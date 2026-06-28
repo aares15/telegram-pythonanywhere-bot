@@ -1,0 +1,17 @@
+# Keep line endings sane across macOS / Linux / Windows checkouts.
+# Default: let git normalize text files to LF in the repo.
+* text=auto
+
+# Shell scripts MUST stay LF even when checked out on Windows — a CRLF in a
+# .sh file gives "bad interpreter: /usr/bin/env bash^M" under WSL/Git-Bash.
+*.sh    text eol=lf
+
+# PowerShell scripts use CRLF on checkout (the Windows convention; pwsh reads
+# either, but editors/tools there expect CRLF).
+*.ps1   text eol=crlf
+
+# Python / config stay LF everywhere.
+*.py    text eol=lf
+*.md    text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
