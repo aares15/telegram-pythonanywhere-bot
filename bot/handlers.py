@@ -5,6 +5,7 @@ from bot.config import COMMIT_SHA, HF_SPACE_ID, HOSTING_LABEL, MODEL, RATE_LIMIT
 from bot.ai import ask_ai
 from bot.helpers import is_allowed, keep_typing, send_reply, should_respond
 from bot.history import clear_history
+from bot.notes import delete_note, get_note, save_note
 from bot.preferences import get_provider, set_provider
 from bot.rate_limit import is_rate_limited
 
@@ -49,20 +50,35 @@ def _log(message, direction: str, text: str) -> None:
 def cmd_start(message):
     bot.send_message(
         message.chat.id,
-        "Hello! I'm your AI assistant. Send me a message to get started.\n\nUse /help to see available commands.",
+        "Hey, I'm your AI assistant🤖 — ask me anything and I'll give you a "
+        "straight, clear answer🫡:"
     )
 
 
 @bot.message_handler(commands=["help"], func=is_allowed)
 def cmd_help(message):
+    intro = (
+        "Hey, I'm your AI assistant🤖 — ask me anything and I'll give you a "
+        "straight, clear answer🫡. Here's what I can do for you:"
+    )
     lines = [
-        "/start — welcome message",
-        "/help  — show this message",
-        "/reset — clear conversation history",
-        "/about — about this bot",
+        intro,
+        "",
+        "/start — click and get conversation started",
+        "/help — shows what i can do",
+        "/reset — wipe our chat history and start clean",
+        "/about — see what's running under the hood (model, storage, version)",
+        "/compliment — get a little compliment to brighten your day",
+        "/fact — get an interesting fact to make you curious",
+        "/quote — get a motivational quote to inspire you",
+        "/remember <text> — save a note for later",
+        "/recall — retrieve your saved note",
+        "/forget — delete your saved note",
     ]
     if HF_SPACE_ID:
-        lines.append("/model — switch AI provider")
+        lines.append("/model — switch which AI brain I'm using")
+    lines.append("")
+    lines.append("Just type normally otherwise — no command needed for a regular question.")
     bot.send_message(message.chat.id, "\n".join(lines))
 
 
@@ -80,7 +96,8 @@ def cmd_about(message):
     else:
         model_line = MODEL
     storage_line = "SQLite" if store is not None else "stateless (no memory)"
-    lines = [
+    lines = [ 
+        f"Personality: "+ ask_ai(message.from_user.id, "summarize your personality in single line"),
         f"Model  : {model_line}",
         f"Storage: {storage_line}",
         f"Hosting: {HOSTING_LABEL}",
@@ -152,3 +169,90 @@ def handle_message(message):
         print(f"Error in handle_message: {e}")
         bot.send_message(message.chat.id, "Something went wrong. Please try again.")
         _log(message, "out", f"[error] {e}")
+
+@bot.message_handler(commands=["joke"], func=is_allowed)
+def cmd_joke(message):
+    reply = ask_ai(message.from_user.id, "Tell one short, clean programming joke.")
+    bot.send_message(message.chat.id, reply)
+
+
+@bot.message_handler(commands=["compliment"], func=is_allowed)
+def cmd_compliment(message):
+    name = message.from_user.first_name or "friend"
+    reply = ask_ai(
+        message.from_user.id,
+        f"Give {name} one short, warm, genuine compliment to brighten their day. "
+        "Keep it to a single friendly sentence and add a cheerful emoji.",
+    )
+    bot.send_message(message.chat.id, reply)
+
+
+
+@bot.message_handler(commands=["quote"], func=is_allowed)
+def cmd_quote(message):
+    name = message.from_user.first_name or "friend"
+    reply = ask_ai(
+        message.from_user.id,
+        f"Give {name} one short, genuine motivational quote to make them be motivated in every situation. "
+        "Keep it to a single friendly sentence and add a masculine emoji.",
+    )
+    bot.send_message(message.chat.id, reply)
+
+
+@bot.message_handler(commands=["fact"], func=is_allowed)
+def cmd_fact(message):
+    name = message.from_user.first_name or "friend"
+    reply = ask_ai(
+        message.from_user.id,
+        f"Give {name} one interesting and true fact about that will make them curious. "
+        "Keep it to a single sentence.",
+    )
+    bot.send_message(message.chat.id, reply)
+
+
+
+@bot.message_handler(commands=["remember"], func=is_allowed)
+def cmd_remember(message):
+    parts = (message.text or "").split(maxsplit=1)
+    note = parts[1].strip() if len(parts) > 1 else ""
+    if not note:
+        bot.send_message(
+            message.chat.id,
+            "Tell me what to remember, like: /remember buy milk tomorrow",
+        )
+        return
+    if save_note(message.from_user.id, note):
+        bot.send_message(message.chat.id, "Saved! Use /recall to get it back.")
+    else:
+        bot.send_message(
+            message.chat.id,
+            "I can't save notes right now — memory isn't set up for this bot.",
+        )
+
+
+@bot.message_handler(commands=["recall"], func=is_allowed)
+def cmd_recall(message):
+    note = get_note(message.from_user.id)
+    if note:
+        bot.send_message(message.chat.id, f"Here's your saved note:\n\n{note}")
+    else:
+        bot.send_message(
+            message.chat.id,
+            "You haven't saved anything yet. Use /remember <text> to save a note.",
+        )
+
+
+@bot.message_handler(commands=["forget"], func=is_allowed)
+def cmd_forget(message):
+    if get_note(message.from_user.id) is None:
+        bot.send_message(message.chat.id, "There's nothing saved to forget.")
+        return
+    if delete_note(message.from_user.id):
+        bot.send_message(message.chat.id, "Done — I've forgotten your saved note.")
+    else:
+        bot.send_message(
+            message.chat.id,
+            "I couldn't clear your note right now — memory isn't set up for this bot.",
+        )
+
+
