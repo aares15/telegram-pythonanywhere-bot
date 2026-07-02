@@ -134,13 +134,38 @@ function Invoke-Pa {
     if (-not $NoAuth) { $headers['Authorization'] = "Token $PaToken" }
     $p = @{
         Uri = $uri; Method = $Method; Headers = $headers; TimeoutSec = $TimeoutSec
-        SkipHttpErrorCheck = $true; StatusCodeVariable = 'code'
+        SkipHttpErrorCheck = $true
     }
-    if ($Form)              { $p.Form = $Body }
-    elseif ($null -ne $Body) { $p.Body = $Body }
+    if ($Form) {
+        $p.Form = $Body
+    } elseif ($null -ne $Body) {
+        # Send a hashtable body as explicit JSON with an explicit Content-Type.
+        # Handing a dictionary straight to -Body lets Invoke-WebRequest infer the
+        # encoding, and the 7.0-era Utility module leaves Content-Type empty on
+        # PATCH — PA then rejects it with HTTP 415 "Unsupported media type".
+        # Setting both ourselves is version-proof (PA's API accepts JSON).
+        if ($Body -is [System.Collections.IDictionary]) {
+            $p.Body = ($Body | ConvertTo-Json -Compress -Depth 5)
+            $p.ContentType = 'application/json'
+        } else {
+            $p.Body = $Body
+        }
+    }
+    # Read the status from the response object (.StatusCode), NOT the
+    # -StatusCodeVariable parameter: that switch only exists in PowerShell 7.4+,
+    # yet this script targets 7.0 (#requires). A 7.0-era Microsoft.PowerShell.Utility
+    # module can also shadow a newer pwsh (7.6 loading a 7.0.0.0 Utility), so
+    # -StatusCodeVariable may be absent even on a recent pwsh — binding it made
+    # every call throw and get misreported as an auth failure. -SkipHttpErrorCheck
+    # (7.0+) keeps 4xx/5xx from throwing so $resp stays populated.
     try {
         $resp = Invoke-WebRequest @p
-        return [pscustomobject]@{ Code = [int]$code; Body = [string]$resp.Content }
+        return [pscustomobject]@{ Code = [int]$resp.StatusCode; Body = [string]$resp.Content }
+    } catch [Microsoft.PowerShell.Commands.HttpResponseException] {
+        # Fallback if -SkipHttpErrorCheck wasn't honored: an HTTP error still
+        # carries a real status code (+ body in ErrorDetails) on the exception.
+        $body = if ($_.ErrorDetails -and $_.ErrorDetails.Message) { [string]$_.ErrorDetails.Message } else { [string]$_.Exception.Message }
+        return [pscustomobject]@{ Code = [int]$_.Exception.Response.StatusCode; Body = $body }
     } catch {
         # Network-level failure (DNS, TLS, timeout) — no HTTP status.
         return [pscustomobject]@{ Code = 0; Body = [string]$_.Exception.Message }

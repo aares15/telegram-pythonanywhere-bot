@@ -203,12 +203,32 @@ switch ($Target.ToLower()) {
     'deploy-pa' {
         Assert-Env
         $deploy = Join-Path $RepoRoot 'scripts\pa_deploy.ps1'
-        # pa_deploy.ps1 needs PowerShell 7. If we're on 5.1 but pwsh exists, use it.
-        if ($PSVersionTable.PSVersion.Major -lt 7 -and (Get-Command pwsh -ErrorAction SilentlyContinue)) {
-            Invoke-Native { & pwsh -NoProfile -File $deploy }
-        } else {
-            # In-process .ps1 call: its own `exit <code>` propagates the failure.
+        # pa_deploy.ps1 has `#requires -Version 7.0` and uses 7-only features
+        # (Invoke-WebRequest -Form / -SkipHttpErrorCheck / -StatusCodeVariable),
+        # so Windows PowerShell 5.1 can't run it at all.
+        if ($PSVersionTable.PSVersion.Major -ge 7) {
+            # Already on 7+: run in-process so its own `exit <code>` propagates.
             & $deploy
+        } else {
+            # On 5.1 we must hand off to pwsh. If it's missing, bootstrap it via
+            # scoop (same approach the `install` target uses) so a student on a
+            # bare Windows box isn't blocked by a cryptic #requires error.
+            $pwsh = Get-Command pwsh -ErrorAction SilentlyContinue
+            if (-not $pwsh) {
+                Write-Host "deploy-pa needs PowerShell 7 (pwsh), which isn't installed. Installing via scoop..." -ForegroundColor Cyan
+                if (Install-Scoop) {
+                    Invoke-Scoop @('install', 'pwsh')
+                    Update-SessionPath
+                    $pwsh = Get-Command pwsh -ErrorAction SilentlyContinue
+                }
+            }
+            if (-not $pwsh) {
+                Write-Host "ERROR: PowerShell 7 is required for deploy-pa and could not be installed automatically." -ForegroundColor Red
+                Write-Host "  Install it with 'scoop install pwsh' or 'winget install Microsoft.PowerShell'," -ForegroundColor Yellow
+                Write-Host "  then open a NEW terminal and re-run '.\make.ps1 deploy-pa'." -ForegroundColor Yellow
+                exit 1
+            }
+            Invoke-Native { & $pwsh.Source -NoProfile -File $deploy }
         }
     }
     'claude' {
