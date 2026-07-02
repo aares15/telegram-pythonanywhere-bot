@@ -99,6 +99,19 @@ SQLITE_PATH = os.environ.get("SQLITE_PATH", "").strip()
 # that is the documented deployment target. Override to suit your host.
 HOSTING_LABEL = os.environ.get("HOSTING_LABEL", "PythonAnywhere").strip()
 
+# News (/news command). Optional. When NEWS_API_KEY is set, /news fetches
+# the latest Armenia headlines from an OpenAI-style-free news API. Defaults
+# target GNews (https://gnews.io) — its /search endpoint returns recent
+# articles matching NEWS_QUERY, newest first. Swap NEWS_API_URL / NEWS_QUERY
+# to use a different provider or region. PA caveat: the news domain is NOT on
+# the free-tier outbound whitelist, so this works locally but needs the domain
+# whitelisted to run on PythonAnywhere.
+NEWS_API_KEY = os.environ.get("NEWS_API_KEY", "").strip()
+NEWS_API_URL = os.environ.get("NEWS_API_URL", "https://gnews.io/api/v4/search").strip()
+NEWS_QUERY = os.environ.get("NEWS_QUERY", "Armenia").strip()
+NEWS_LANG = os.environ.get("NEWS_LANG", "en").strip()
+NEWS_REQUEST_TIMEOUT = 15  # seconds — fail fast so a slow news API can't wedge the worker
+
 # Auto-deploy webhook secret. When set, /api/deploy accepts requests
 # that present this value in the X-Deploy-Secret header and runs
 # `git pull` + WSGI reload. When unset, /api/deploy returns 403 — the

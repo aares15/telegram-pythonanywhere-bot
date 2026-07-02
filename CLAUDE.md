@@ -25,6 +25,7 @@ telegram-pythonanywhere-bot/
 │   ├── store.py          # SqliteStore — KV with lazy TTL expiry, backed by sqlite3
 │   ├── ai.py             # ask_ai() — history + dispatch to providers
 │   ├── providers.py      # Provider dispatch: OpenAI-compatible (with retry) or HF Gradio space
+│   ├── news.py           # get_top_news() — fetches latest Armenia headlines via a news API (/news command)
 │   ├── preferences.py    # Per-user provider preference stored via store
 │   ├── history.py        # get/save/clear conversation history via store (graceful degradation)
 │   ├── rate_limit.py     # Per-user daily message rate limiting via store (graceful degradation)
@@ -42,6 +43,7 @@ telegram-pythonanywhere-bot/
 │   ├── test_rate_limit.py
 │   ├── test_dedupe.py
 │   ├── test_store.py     # Direct SqliteStore tests (get/set/delete/incr/expire + TTL)
+│   ├── test_news.py      # get_top_news() parsing + /news handler
 │   ├── test_deploy.py    # /api/deploy auto-deploy webhook (secret verification + git pull)
 │   └── test_webhook.py
 ├── .github/
@@ -90,6 +92,10 @@ telegram-pythonanywhere-bot/
 | `RATE_LIMIT` | No | `250` | Max messages per user per day |
 | `ALLOWED_USERS` | No | _open_ | Comma-separated whitelist of usernames (with/without `@`) or numeric user IDs. Empty = everyone allowed. Non-empty = silent drop for non-whitelisted (no rejection reply, no leak of bot existence). Implemented as `func=is_allowed` on every `@bot.message_handler` so telebot never dispatches the handler |
 | `HOSTING_LABEL` | No | `PythonAnywhere` | Label shown by the `/about` command |
+| `NEWS_API_KEY` | No | — | Enables the `/news` command (top 3 latest Armenia headlines). Free key from https://gnews.io. When unset, `/news` replies that news isn't set up. **PA caveat:** `gnews.io` is NOT on the free-tier outbound whitelist — works locally, but needs the domain whitelisted (or a whitelisted provider) to run on PA |
+| `NEWS_API_URL` | No | `https://gnews.io/api/v4/search` | News API endpoint. Swap to use a different provider (must return `{"articles": [{title, source:{name}, url}]}`) |
+| `NEWS_QUERY` | No | `Armenia` | Search query used for `/news`. Change for a different topic/region |
+| `NEWS_LANG` | No | `en` | Article language passed to the news API |
 | `DEPLOY_SECRET` | No | — | Enables `/api/deploy` auto-deploy webhook. Fail-closed: when unset, the endpoint returns 403. Generate with `openssl rand -hex 32` and set the same value as a GitHub repo secret named `DEPLOY_SECRET` so the workflow at `.github/workflows/deploy.yml` can call the endpoint |
 
 All env vars are read in `bot/config.py`. `.strip()` is called on every value to defend against trailing newlines / whitespace from copy-paste.

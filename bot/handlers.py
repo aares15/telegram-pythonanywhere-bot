@@ -5,6 +5,7 @@ from bot.config import COMMIT_SHA, HF_SPACE_ID, HOSTING_LABEL, MODEL, RATE_LIMIT
 from bot.ai import ask_ai
 from bot.helpers import is_allowed, keep_typing, send_reply, should_respond
 from bot.history import clear_history
+from bot.news import get_top_news, news_configured
 from bot.notes import delete_note, get_note, save_note
 from bot.preferences import get_provider, set_provider
 from bot.rate_limit import is_rate_limited
@@ -71,6 +72,7 @@ def cmd_help(message):
         "/compliment — get a little compliment to brighten your day",
         "/fact — get an interesting fact to make you curious",
         "/quote — get a motivational quote to inspire you",
+        "/news — get the top 3 latest news in Armenia",
         "/remember <text> — save a note for later",
         "/recall — retrieve your saved note",
         "/forget — delete your saved note",
@@ -209,6 +211,32 @@ def cmd_fact(message):
     )
     bot.send_message(message.chat.id, reply)
 
+
+
+@bot.message_handler(commands=["news"], func=is_allowed)
+def cmd_news(message):
+    if not news_configured():
+        bot.send_message(
+            message.chat.id,
+            "News isn't set up for this bot yet. "
+            "Add a NEWS_API_KEY (free from https://gnews.io) to enable /news.",
+        )
+        return
+    with keep_typing(message.chat.id):
+        items = get_top_news(3)
+    if not items:
+        bot.send_message(
+            message.chat.id,
+            "Couldn't fetch the news right now — please try again in a bit.",
+        )
+        return
+    lines = ["📰 Top latest news in Armenia:", ""]
+    for i, item in enumerate(items, start=1):
+        lines.append(f"{i}. {item['title']}")
+        detail = " — ".join(part for part in (item["source"], item["url"]) if part)
+        if detail:
+            lines.append(f"   {detail}")
+    send_reply(message, "\n".join(lines))
 
 
 @bot.message_handler(commands=["remember"], func=is_allowed)

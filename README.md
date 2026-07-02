@@ -441,6 +441,7 @@ make deploy-pa  # one-command PythonAnywhere deploy (see "Fast path" in Part 2)
 | `/help` | List all commands |
 | `/reset` | Clear your conversation history |
 | `/about` | Show model, storage, and hosting info |
+| `/news` | Top 3 latest news in Armenia (only available when `NEWS_API_KEY` is set) |
 | `/model` | Switch AI provider (only available when `HF_SPACE_ID` is set) |
 
 ---

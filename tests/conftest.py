@@ -35,3 +35,4 @@ sys.modules["telebot.types"] = MagicMock()
 sys.modules["openai"] = MagicMock()
 sys.modules["flask"] = mock_flask
 sys.modules["gradio_client"] = MagicMock()
+sys.modules["requests"] = MagicMock()
