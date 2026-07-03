@@ -1,0 +1,52 @@
+name: Daily Quiz Push
+
+# Fires the bot's /api/tick endpoint each morning, which broadcasts the day's
+# quiz to every /subscribe'd chat. Requires two GitHub repo secrets
+# (Settings -> Secrets and variables -> Actions):
+#
+#   PA_TICK_URL   e.g. https://<your-pa-username>.pythonanywhere.com/api/tick
+#   TICK_SECRET   must match TICK_SECRET in PA's .env
+#
+# CAVEATS of GitHub scheduled workflows:
+#  * Timing is BEST-EFFORT — cron runs can be delayed by many minutes under
+#    GitHub load, and only the DEFAULT branch's copy of this file is scheduled.
+#  * A scheduled workflow AUTO-DISABLES after 60 days with no repo activity
+#    (commits). A monthly commit — or the manual "Run workflow" below — keeps it
+#    alive. This dovetails with PA free tier's monthly web-app renewal.
+#  * cron is always UTC. Yerevan is UTC+4, so 04:00 UTC == 08:00 Yerevan.
+
+on:
+  schedule:
+    - cron: "0 4 * * *"   # 08:00 Asia/Yerevan (UTC+4)
+  workflow_dispatch: {}   # allow manual triggers from the Actions tab
+
+# Don't let a manual run overlap the scheduled one (the endpoint is idempotent
+# per day anyway, but this avoids a redundant call).
+concurrency:
+  group: daily-quiz
+  cancel-in-progress: false
+
+jobs:
+  push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger daily quiz broadcast
+        # Pass secrets through env: instead of inline ${{ }} so a value with
+        # shell metacharacters can't alter the command.
+        env:
+          PA_TICK_URL: ${{ secrets.PA_TICK_URL }}
+          TICK_SECRET: ${{ secrets.TICK_SECRET }}
+        run: |
+          if [ -z "$PA_TICK_URL" ] || [ -z "$TICK_SECRET" ]; then
+            echo "::warning::PA_TICK_URL or TICK_SECRET not set in repo secrets; skipping."
+            exit 0
+          fi
+          # --retry rides out PA outbound-proxy blips. Safe: /api/tick is
+          # idempotent per day (server-side once-per-day claim), so a retry
+          # after a partial send returns "already broadcast" rather than
+          # double-posting.
+          curl -fsS -X POST \
+            -H "X-Tick-Secret: $TICK_SECRET" \
+            --max-time 90 \
+            --retry 2 --retry-delay 15 --retry-all-errors \
+            "$PA_TICK_URL"

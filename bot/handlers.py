@@ -1,13 +1,28 @@
 import os
 from datetime import datetime
 from bot.clients import bot, BOT_INFO, store
-from bot.config import COMMIT_SHA, HF_SPACE_ID, HOSTING_LABEL, MODEL, RATE_LIMIT
+from bot.config import (
+    COMMIT_SHA,
+    HF_SPACE_ID,
+    HOSTING_LABEL,
+    MODEL,
+    QUIZ_LEADERBOARD_SIZE,
+    RATE_LIMIT,
+)
 from bot.ai import ask_ai
 from bot.helpers import is_allowed, keep_typing, send_reply, should_respond
 from bot.history import clear_history
 from bot.news import get_top_news, get_world_news, news_configured
 from bot.notes import delete_note, get_note, save_note
 from bot.preferences import get_provider, set_provider
+from bot.quiz import (
+    apply_poll_answer,
+    generate_question,
+    get_leaderboard,
+    save_poll,
+    subscribe,
+    unsubscribe,
+)
 from bot.rate_limit import is_rate_limited
 
 # Verbose console logging for local dev and teaching. Enabled by
@@ -70,6 +85,9 @@ def cmd_help(message):
         "/reset — wipe our chat history and start clean",
         "/about — see what's running under the hood (model, storage, version)",
         "/sha — show the live git commit SHA",
+        "/quiz [topic] — start a trivia quiz (auto-scored) 🧠",
+        "/leaderboard — see the top quiz scorers in this chat",
+        "/subscribe — get a daily quiz here each morning (/unsubscribe to stop)",
         "/compliment — get a little compliment to brighten your day",
         "/fact — get an interesting fact to make you curious",
         "/quote — get a motivational quote to inspire you",
@@ -100,7 +118,7 @@ def cmd_about(message):
     else:
         model_line = MODEL
     storage_line = "SQLite" if store is not None else "stateless (no memory)"
-    lines = [ 
+    lines = [
         f"Personality: "+ ask_ai(message.from_user.id, "summarize your personality in single line"),
         f"Model  : {model_line}",
         f"Storage: {storage_line}",
@@ -155,31 +173,6 @@ if HF_SPACE_ID:
             bot.send_message(message.chat.id, "Switched to Main Provider.")
 
 
-@bot.message_handler(content_types=["text"], func=is_allowed)
-def handle_message(message):
-    if not should_respond(message):
-        return
-    text = (message.text or "").replace(f"@{BOT_INFO.username}", "").strip()
-    if not text:
-        # Edited messages, forwards, or stickers-with-empty-caption can
-        # arrive with no usable text. Don't burn rate-limit / AI calls on them.
-        return
-    _log(message, "in", text)
-    if is_rate_limited(message.from_user.id):
-        limit_msg = f"You've reached the daily limit of {RATE_LIMIT} messages. Try again tomorrow."
-        bot.send_message(message.chat.id, limit_msg)
-        _log(message, "out", f"[rate limited] {limit_msg}")
-        return
-    try:
-        with keep_typing(message.chat.id):
-            reply = ask_ai(message.from_user.id, text)
-        send_reply(message, reply)
-        _log(message, "out", reply)
-    except Exception as e:
-        print(f"Error in handle_message: {e}")
-        bot.send_message(message.chat.id, "Something went wrong. Please try again.")
-        _log(message, "out", f"[error] {e}")
-
 @bot.message_handler(commands=["joke"], func=is_allowed)
 def cmd_joke(message):
     reply = ask_ai(message.from_user.id, "Tell one short, clean programming joke.")
@@ -195,7 +188,6 @@ def cmd_compliment(message):
         "Keep it to a single friendly sentence and add a cheerful emoji.",
     )
     bot.send_message(message.chat.id, reply)
-
 
 
 @bot.message_handler(commands=["quote"], func=is_allowed)
@@ -218,7 +210,6 @@ def cmd_fact(message):
         "Keep it to a single sentence.",
     )
     bot.send_message(message.chat.id, reply)
-
 
 
 def _send_news(message, header, fetch):
@@ -312,3 +303,124 @@ def cmd_forget(message):
         )
 
 
+# ── Daily Quiz Arena ─────────────────────────────────────────────────────────
+
+@bot.message_handler(commands=["quiz", "trivia"], func=is_allowed)
+def cmd_quiz(message):
+    parts = (message.text or "").split(maxsplit=1)
+    topic = parts[1].strip() if len(parts) > 1 else None
+    with keep_typing(message.chat.id):
+        quiz = generate_question(topic)
+    if not quiz:
+        bot.send_message(
+            message.chat.id,
+            "Couldn't spin up a quiz right now — give it another go in a moment.",
+        )
+        return
+    try:
+        # is_anonymous=False is REQUIRED: anonymous polls don't report who
+        # answered, so scoring in group chats would be impossible otherwise.
+        sent = bot.send_poll(
+            message.chat.id,
+            quiz["question"],
+            quiz["options"],
+            type="quiz",
+            correct_option_id=quiz["correct_index"],
+            explanation=quiz["explanation"] or None,
+            is_anonymous=False,
+            allows_multiple_answers=False,
+        )
+    except Exception as e:
+        print(f"send_poll failed in /quiz: {e}")
+        bot.send_message(message.chat.id, "Couldn't post the quiz — try again in a bit.")
+        return
+    poll = getattr(sent, "poll", None)
+    if poll is not None:
+        save_poll(poll.id, message.chat.id, quiz["correct_index"])
+
+
+@bot.message_handler(commands=["leaderboard", "scores", "top"], func=is_allowed)
+def cmd_leaderboard(message):
+    board = get_leaderboard(message.chat.id, QUIZ_LEADERBOARD_SIZE)
+    if board is None:
+        bot.send_message(
+            message.chat.id,
+            "Scores need memory, which isn't set up for this bot yet.",
+        )
+        return
+    if not board:
+        bot.send_message(
+            message.chat.id,
+            "No scores yet — run /quiz to get the game going! 🧠",
+        )
+        return
+    medals = ["🥇", "🥈", "🥉"]
+    lines = ["🏆 Quiz leaderboard:", ""]
+    for i, (name, score) in enumerate(board):
+        rank = medals[i] if i < 3 else f"{i + 1}."
+        lines.append(f"{rank} {name} — {score}")
+    send_reply(message, "\n".join(lines))
+
+
+@bot.message_handler(commands=["subscribe"], func=is_allowed)
+def cmd_subscribe(message):
+    result = subscribe(message.chat.id)
+    text = {
+        "added": "You're in! 🧠 You'll get the Daily Quiz here each morning. Use /unsubscribe to stop.",
+        "already": "This chat is already subscribed to the Daily Quiz. ✅",
+        "no_store": "The Daily Quiz needs memory, which isn't set up for this bot yet.",
+    }[result]
+    bot.send_message(message.chat.id, text)
+
+
+@bot.message_handler(commands=["unsubscribe"], func=is_allowed)
+def cmd_unsubscribe(message):
+    result = unsubscribe(message.chat.id)
+    text = {
+        "removed": "Unsubscribed — no more daily quizzes here. 👋",
+        "not_subscribed": "This chat wasn't subscribed to the Daily Quiz.",
+        "no_store": "The Daily Quiz isn't set up for this bot yet.",
+    }[result]
+    bot.send_message(message.chat.id, text)
+
+
+@bot.poll_answer_handler(func=lambda pa: True)
+def on_poll_answer(poll_answer):
+    # Silent scorer: the quiz poll itself already reveals correct/wrong, and a
+    # per-answer reply would spam group chats. We only update the leaderboard
+    # and streak. No func=is_allowed here — a PollAnswer has no from_user, so
+    # is_allowed would reject every answer whenever a whitelist is set.
+    try:
+        apply_poll_answer(poll_answer)
+    except Exception as e:
+        print(f"Error in on_poll_answer: {e}")
+
+
+# NOTE: handle_message MUST remain the LAST registered message handler. Its
+# content_types=["text"] filter matches command messages too, and telebot runs
+# the first matching handler then stops — so any command handler registered
+# BELOW this one would be shadowed and never fire. Register new commands ABOVE.
+@bot.message_handler(content_types=["text"], func=is_allowed)
+def handle_message(message):
+    if not should_respond(message):
+        return
+    text = (message.text or "").replace(f"@{BOT_INFO.username}", "").strip()
+    if not text:
+        # Edited messages, forwards, or stickers-with-empty-caption can
+        # arrive with no usable text. Don't burn rate-limit / AI calls on them.
+        return
+    _log(message, "in", text)
+    if is_rate_limited(message.from_user.id):
+        limit_msg = f"You've reached the daily limit of {RATE_LIMIT} messages. Try again tomorrow."
+        bot.send_message(message.chat.id, limit_msg)
+        _log(message, "out", f"[rate limited] {limit_msg}")
+        return
+    try:
+        with keep_typing(message.chat.id):
+            reply = ask_ai(message.from_user.id, text)
+        send_reply(message, reply)
+        _log(message, "out", reply)
+    except Exception as e:
+        print(f"Error in handle_message: {e}")
+        bot.send_message(message.chat.id, "Something went wrong. Please try again.")
+        _log(message, "out", f"[error] {e}")

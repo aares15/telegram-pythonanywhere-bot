@@ -118,7 +118,16 @@ def register_webhook() -> str:
     # the SQLite store; without this, two quick messages from the same
     # user can interleave and lose a turn. PA's single-worker free tier
     # makes this cheap — at most one update in flight at a time anyway.
-    kwargs = {"url": WEBHOOK_URL, "max_connections": 1}
+    # allowed_updates is set explicitly so poll_answer updates (quiz scoring)
+    # are always delivered. Telegram's default set already includes them, but
+    # this code never set it before — being explicit removes any doubt about a
+    # webhook previously registered with a narrower list. ["message",
+    # "poll_answer"] is the complete set of update types this bot consumes.
+    kwargs = {
+        "url": WEBHOOK_URL,
+        "max_connections": 1,
+        "allowed_updates": ["message", "poll_answer"],
+    }
     if WEBHOOK_SECRET:
         kwargs["secret_token"] = WEBHOOK_SECRET
 

@@ -133,6 +133,26 @@ NEWS_WORLD_CATEGORY = os.environ.get("NEWS_WORLD_CATEGORY", "general").strip()
 # endpoint is fail-closed.
 DEPLOY_SECRET = os.environ.get("DEPLOY_SECRET", "").strip()
 
+# Daily Quiz Arena (/quiz, /leaderboard, /subscribe + daily push). Question
+# generation uses the whitelisted Cerebras path (bot/providers._call_main), so
+# no new outbound host is needed. Scores / leaderboards / streaks / subscribers
+# live in the SQLite store as JSON blobs and degrade to no-ops in stateless mode.
+QUIZ_POINTS = int(os.environ.get("QUIZ_POINTS", "10"))  # points per correct answer
+QUIZ_POLL_TTL = int(os.environ.get("QUIZ_POLL_TTL", "86400"))  # poll->answer scoring window (s)
+QUIZ_BOARD_TTL = int(os.environ.get("QUIZ_BOARD_TTL", "2592000"))  # per-chat leaderboard TTL (30d)
+QUIZ_STREAK_TTL = int(os.environ.get("QUIZ_STREAK_TTL", "2592000"))  # per-user streak TTL (30d)
+QUIZ_LEADERBOARD_SIZE = int(os.environ.get("QUIZ_LEADERBOARD_SIZE", "10"))  # rows shown by /leaderboard
+
+# Daily quiz push. /api/tick (called by .github/workflows/daily-quiz.yml on a
+# schedule) broadcasts the day's quiz to every /subscribe'd chat. Fail-closed:
+# when TICK_SECRET is unset the endpoint returns 403. Deliberately a SEPARATE,
+# lower-privilege secret from DEPLOY_SECRET — a leaked DEPLOY_SECRET is remote
+# code execution (git reset + pip + reload); a leaked TICK_SECRET can only
+# trigger a quiz broadcast. Never share the two.
+TICK_SECRET = os.environ.get("TICK_SECRET", "").strip()
+QUIZ_OPEN_PERIOD = int(os.environ.get("QUIZ_OPEN_PERIOD", "86400"))  # daily poll open window (s)
+QUIZ_MAX_BROADCAST = int(os.environ.get("QUIZ_MAX_BROADCAST", "100"))  # cap chats per daily push
+
 # App
 SYSTEM_PROMPT = (
     "You are a omniscient and helpful AI assistant. "

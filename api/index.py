@@ -358,3 +358,36 @@ def deploy():
             except Exception:
                 pass
         os.close(lock_fd)
+
+
+@app.route("/api/tick", methods=["POST"])
+def tick():
+    """Daily-quiz broadcast trigger, called on a schedule by
+    .github/workflows/daily-quiz.yml.
+
+    Verifies an X-Tick-Secret header against TICK_SECRET (constant-time).
+    Fail-closed: returns 403 when TICK_SECRET is unset, so a misconfigured
+    deploy can't let anyone spam subscribers. This is a DIFFERENT secret from
+    the Telegram webhook secret (X-Telegram-Bot-Api-Secret-Token) and, by
+    design, from DEPLOY_SECRET — the tick endpoint only broadcasts a quiz, so
+    it must not carry the deploy endpoint's code-execution authority.
+
+    No fcntl flock (unlike /api/deploy): run_daily_quiz() takes an atomic
+    once-per-day store claim, so overlapping or retried calls are idempotent.
+    run_daily_quiz never raises, so the endpoint returns 200 with a summary
+    body even for "no subscribers" / "already sent" / "generation failed".
+    """
+    from bot.config import TICK_SECRET
+
+    if not TICK_SECRET:
+        return "Tick endpoint disabled (TICK_SECRET unset)", 403
+
+    provided = request.headers.get("X-Tick-Secret", "")
+    if not hmac.compare_digest(provided, TICK_SECRET):
+        return "Forbidden", 403
+
+    from bot.quiz import run_daily_quiz
+
+    summary = run_daily_quiz()
+    print(summary)
+    return summary + "\n", 200

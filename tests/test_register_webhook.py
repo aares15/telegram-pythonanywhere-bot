@@ -31,6 +31,7 @@ def test_register_webhook_calls_set_webhook_with_url():
         mock_bot.set_webhook.assert_called_once_with(
             url="https://example.com/api/webhook",
             max_connections=1,
+            allowed_updates=["message", "poll_answer"],
         )
         assert "https://example.com/api/webhook" in msg
 

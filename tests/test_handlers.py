@@ -122,6 +122,7 @@ def test_cmd_about_with_sqlite():
     """When SQLite is configured, /about should reference SQLite."""
     with (
         patch("bot.handlers.bot") as mock_bot,
+        patch("bot.handlers.ask_ai", return_value="helpful, clear, and direct"),
         patch("bot.handlers.store", MagicMock()),
         patch("bot.handlers.HF_SPACE_ID", ""),
     ):
@@ -139,6 +140,7 @@ def test_cmd_about_includes_commit_sha_when_set():
     live."""
     with (
         patch("bot.handlers.bot") as mock_bot,
+        patch("bot.handlers.ask_ai", return_value="helpful, clear, and direct"),
         patch("bot.handlers.store", MagicMock()),
         patch("bot.handlers.HF_SPACE_ID", ""),
         patch("bot.handlers.COMMIT_SHA", "abc1234"),
@@ -155,6 +157,7 @@ def test_cmd_about_omits_version_line_when_sha_unknown():
     entirely rather than showing 'unknown' — clearer for the user."""
     with (
         patch("bot.handlers.bot") as mock_bot,
+        patch("bot.handlers.ask_ai", return_value="helpful, clear, and direct"),
         patch("bot.handlers.store", MagicMock()),
         patch("bot.handlers.HF_SPACE_ID", ""),
         patch("bot.handlers.COMMIT_SHA", ""),
@@ -172,6 +175,7 @@ def test_cmd_about_without_store():
     bot.handlers' imports."""
     with (
         patch("bot.handlers.bot") as mock_bot,
+        patch("bot.handlers.ask_ai", return_value="helpful, clear, and direct"),
         patch("bot.handlers.store", None),
         patch("bot.handlers.HF_SPACE_ID", ""),
     ):
@@ -326,3 +330,28 @@ def test_handle_message_uses_keep_typing():
         msg = make_message()
         handle_message(msg)
         mock_keep.assert_called_once_with(456)
+
+
+def test_handle_message_registered_last():
+    """handle_message MUST be the last message handler in source order.
+
+    Its content_types=["text"] filter matches command messages too, and
+    telebot runs the first matching handler then stops — so any command
+    handler defined *below* it would be silently shadowed (never fire). This
+    guard fails loudly if a future edit reintroduces that ordering bug.
+    """
+    import inspect
+
+    import bot.handlers as h
+
+    src = inspect.getsource(h)
+    hm = src.index("def handle_message(")
+    for name in (
+        "def cmd_quiz(",
+        "def cmd_leaderboard(",
+        "def cmd_subscribe(",
+        "def cmd_news(",
+        "def cmd_joke(",
+        "def cmd_forget(",
+    ):
+        assert src.index(name) < hm, f"{name} must be defined before handle_message"
