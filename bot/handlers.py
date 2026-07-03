@@ -5,7 +5,7 @@ from bot.config import COMMIT_SHA, HF_SPACE_ID, HOSTING_LABEL, MODEL, RATE_LIMIT
 from bot.ai import ask_ai
 from bot.helpers import is_allowed, keep_typing, send_reply, should_respond
 from bot.history import clear_history
-from bot.news import get_top_news, news_configured
+from bot.news import get_top_news, get_world_news, news_configured
 from bot.notes import delete_note, get_note, save_note
 from bot.preferences import get_provider, set_provider
 from bot.rate_limit import is_rate_limited
@@ -72,7 +72,8 @@ def cmd_help(message):
         "/compliment — get a little compliment to brighten your day",
         "/fact — get an interesting fact to make you curious",
         "/quote — get a motivational quote to inspire you",
-        "/news — get the top 3 latest news in Armenia",
+        "/newsArmenia — get the top 3 latest news in Armenia",
+        "/newsWorldwide — get the top 3 interesting news around the world",
         "/remember <text> — save a note for later",
         "/recall — retrieve your saved note",
         "/forget — delete your saved note",
@@ -213,30 +214,50 @@ def cmd_fact(message):
 
 
 
-@bot.message_handler(commands=["news"], func=is_allowed)
-def cmd_news(message):
+def _send_news(message, header, fetch):
+    """Shared body for the news commands. Checks the feature is configured,
+    fetches the top 3 items via `fetch`, and sends a numbered list under
+    `header`. `fetch` is get_top_news (Armenia) or get_world_news (world) —
+    both take a count and return a list of {title, source, url} or None."""
     if not news_configured():
         bot.send_message(
             message.chat.id,
             "News isn't set up for this bot yet. "
-            "Add a NEWS_API_KEY (free from https://gnews.io) to enable /news.",
+            "Add a NEWS_API_KEY (free from https://gnews.io) to enable news.",
         )
         return
     with keep_typing(message.chat.id):
-        items = get_top_news(3)
+        items = fetch(3)
     if not items:
         bot.send_message(
             message.chat.id,
             "Couldn't fetch the news right now — please try again in a bit.",
         )
         return
-    lines = ["📰 Top latest news in Armenia:", ""]
+    lines = [header, ""]
     for i, item in enumerate(items, start=1):
         lines.append(f"{i}. {item['title']}")
         detail = " — ".join(part for part in (item["source"], item["url"]) if part)
         if detail:
             lines.append(f"   {detail}")
     send_reply(message, "\n".join(lines))
+
+
+# Multiple spellings are registered per command: Telegram delivers commands
+# verbatim (telebot matches them case-sensitively), so /newsArmenia and a
+# lowercase/underscored /newsarmenia both need to be listed to "just work".
+@bot.message_handler(
+    commands=["newsArmenia", "newsarmenia", "news_armenia", "news"], func=is_allowed
+)
+def cmd_news_Armenia(message):
+    _send_news(message, "📰 Top latest news in Armenia:", get_top_news)
+
+
+@bot.message_handler(
+    commands=["newsWorldwide", "newsworldwide", "news_worldwide"], func=is_allowed
+)
+def cmd_news_worldwide(message):
+    _send_news(message, "🌍 Top interesting news around the world:", get_world_news)
 
 
 @bot.message_handler(commands=["remember"], func=is_allowed)

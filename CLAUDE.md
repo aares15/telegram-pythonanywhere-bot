@@ -25,7 +25,7 @@ telegram-pythonanywhere-bot/
 │   ├── store.py          # SqliteStore — KV with lazy TTL expiry, backed by sqlite3
 │   ├── ai.py             # ask_ai() — history + dispatch to providers
 │   ├── providers.py      # Provider dispatch: OpenAI-compatible (with retry) or HF Gradio space
-│   ├── news.py           # get_top_news() — fetches latest Armenia headlines via a news API (/news command)
+│   ├── news.py           # get_top_news() (Armenia search) + get_world_news() (world top-headlines) — /newsArmenia and /newsWorldwide
 │   ├── preferences.py    # Per-user provider preference stored via store
 │   ├── history.py        # get/save/clear conversation history via store (graceful degradation)
 │   ├── rate_limit.py     # Per-user daily message rate limiting via store (graceful degradation)
@@ -92,10 +92,12 @@ telegram-pythonanywhere-bot/
 | `RATE_LIMIT` | No | `250` | Max messages per user per day |
 | `ALLOWED_USERS` | No | _open_ | Comma-separated whitelist of usernames (with/without `@`) or numeric user IDs. Empty = everyone allowed. Non-empty = silent drop for non-whitelisted (no rejection reply, no leak of bot existence). Implemented as `func=is_allowed` on every `@bot.message_handler` so telebot never dispatches the handler |
 | `HOSTING_LABEL` | No | `PythonAnywhere` | Label shown by the `/about` command |
-| `NEWS_API_KEY` | No | — | Enables the `/news` command (top 3 latest Armenia headlines). Free key from https://gnews.io. When unset, `/news` replies that news isn't set up. **PA caveat:** `gnews.io` is NOT on the free-tier outbound whitelist — works locally, but needs the domain whitelisted (or a whitelisted provider) to run on PA |
-| `NEWS_API_URL` | No | `https://gnews.io/api/v4/search` | News API endpoint. Swap to use a different provider (must return `{"articles": [{title, source:{name}, url}]}`) |
-| `NEWS_QUERY` | No | `Armenia` | Search query used for `/news`. Change for a different topic/region |
-| `NEWS_LANG` | No | `en` | Article language passed to the news API |
+| `NEWS_API_KEY` | No | — | Enables the `/newsArmenia` and `/newsWorldwide` commands (top 3 headlines each). Free key from https://gnews.io. When unset, both reply that news isn't set up. **PA caveat:** `gnews.io` is NOT on the free-tier outbound whitelist — works locally, but needs the domain whitelisted (or a whitelisted provider) to run on PA |
+| `NEWS_API_URL` | No | `https://gnews.io/api/v4/search` | **Armenia** news endpoint (`/search`). Swap to use a different provider (must return `{"articles": [{title, source:{name}, url}]}`) |
+| `NEWS_QUERY` | No | `Armenia in:title,description` | Search query used for `/newsArmenia`. Uses GNews's `in:title,description` attribute so "Armenia" must appear in the headline/summary — keeps results Armenia-focused, not any article mentioning it in passing. Change for a different topic/region |
+| `NEWS_WORLD_API_URL` | No | `https://gnews.io/api/v4/top-headlines` | **Worldwide** news endpoint (`/top-headlines`) used by `/newsWorldwide`. Returns ranked current headlines by category (no search term). Same JSON shape as `NEWS_API_URL` |
+| `NEWS_WORLD_CATEGORY` | No | `general` | Category for `/newsWorldwide`: `general` (top overall) or one of `world` / `nation` / `business` / `technology` / `entertainment` / `sports` / `science` / `health` |
+| `NEWS_LANG` | No | `en` | Article language passed to the news API (both commands) |
 | `DEPLOY_SECRET` | No | — | Enables `/api/deploy` auto-deploy webhook. Fail-closed: when unset, the endpoint returns 403. Generate with `openssl rand -hex 32` and set the same value as a GitHub repo secret named `DEPLOY_SECRET` so the workflow at `.github/workflows/deploy.yml` can call the endpoint |
 
 All env vars are read in `bot/config.py`. `.strip()` is called on every value to defend against trailing newlines / whitespace from copy-paste.

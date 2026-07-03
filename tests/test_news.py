@@ -76,6 +76,45 @@ def test_get_top_news_returns_none_on_error():
         assert get_top_news() is None
 
 
+# ── get_world_news ───────────────────────────────────────────────────────────
+
+
+def test_get_world_news_uses_top_headlines_endpoint():
+    articles = [{"title": "World news", "source": {"name": "SrcW"}, "url": "http://w"}]
+    with (
+        patch("bot.news.NEWS_API_KEY", "key"),
+        patch("bot.news.requests.get", return_value=_fake_response(articles)) as mock_get,
+    ):
+        from bot.news import get_world_news
+
+        items = get_world_news(3)
+        assert items == [{"title": "World news", "source": "SrcW", "url": "http://w"}]
+        called_url = mock_get.call_args[0][0]
+        params = mock_get.call_args.kwargs["params"]
+        # World news hits /top-headlines by category — not the keyword search
+        assert "top-headlines" in called_url
+        assert "category" in params
+        assert "q" not in params
+        assert params["max"] == 3
+
+
+def test_get_world_news_returns_none_without_key():
+    with patch("bot.news.NEWS_API_KEY", ""):
+        from bot.news import get_world_news
+
+        assert get_world_news() is None
+
+
+def test_get_world_news_returns_none_on_error():
+    with (
+        patch("bot.news.NEWS_API_KEY", "key"),
+        patch("bot.news.requests.get", side_effect=Exception("network down")),
+    ):
+        from bot.news import get_world_news
+
+        assert get_world_news() is None
+
+
 def test_news_configured_reflects_key():
     from bot import news
 
@@ -139,3 +178,28 @@ def test_cmd_news_fetch_failure():
         cmd_news(make_message(text="/news"))
         mock_send.assert_not_called()
         assert "Couldn't fetch" in mock_bot.send_message.call_args[0][1]
+
+
+def test_cmd_news_worldwide_sends_headlines():
+    items = [
+        {"title": "World one", "source": "SrcA", "url": "http://a"},
+        {"title": "World two", "source": "SrcB", "url": "http://b"},
+    ]
+    with (
+        patch("bot.handlers.news_configured", return_value=True),
+        patch("bot.handlers.get_world_news", return_value=items),
+        patch("bot.handlers.get_top_news") as mock_armenia,
+        patch("bot.handlers.keep_typing"),
+        patch("bot.handlers.send_reply") as mock_send,
+        patch("bot.handlers.bot"),
+    ):
+        from bot.handlers import cmd_news_worldwide
+        from tests.test_handlers import make_message
+
+        cmd_news_worldwide(make_message(text="/newsWorldwide"))
+        sent = mock_send.call_args[0][1]
+        assert "World one" in sent
+        assert "World two" in sent
+        assert "around the world" in sent.lower()
+        # The world command must not fall back to the Armenia fetch
+        mock_armenia.assert_not_called()

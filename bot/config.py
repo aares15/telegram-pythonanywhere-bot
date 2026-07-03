@@ -106,11 +106,26 @@ HOSTING_LABEL = os.environ.get("HOSTING_LABEL", "PythonAnywhere").strip()
 # to use a different provider or region. PA caveat: the news domain is NOT on
 # the free-tier outbound whitelist, so this works locally but needs the domain
 # whitelisted to run on PythonAnywhere.
+#
+# NEWS_QUERY uses GNews's `in:title,description` attribute so "Armenia" must
+# appear in the headline or summary — this keeps /news Armenia-focused instead
+# of surfacing any global article that only mentions Armenia in passing.
 NEWS_API_KEY = os.environ.get("NEWS_API_KEY", "").strip()
 NEWS_API_URL = os.environ.get("NEWS_API_URL", "https://gnews.io/api/v4/search").strip()
-NEWS_QUERY = os.environ.get("NEWS_QUERY", "Armenia").strip()
+NEWS_QUERY = os.environ.get("NEWS_QUERY", "Armenia in:title,description").strip()
 NEWS_LANG = os.environ.get("NEWS_LANG", "en").strip()
 NEWS_REQUEST_TIMEOUT = 15  # seconds — fail fast so a slow news API can't wedge the worker
+
+# Worldwide news for /newsWorldwide. Unlike Armenia news (a keyword *search*),
+# world news uses GNews's /top-headlines endpoint, which returns ranked current
+# headlines with no search term — i.e. the interesting stories going on right
+# now. NEWS_WORLD_CATEGORY picks the slice: "general" (top overall) or one of
+# world / nation / business / technology / entertainment / sports / science /
+# health. Same NEWS_API_KEY, NEWS_LANG, and PA-whitelist caveat as above.
+NEWS_WORLD_API_URL = os.environ.get(
+    "NEWS_WORLD_API_URL", "https://gnews.io/api/v4/top-headlines"
+).strip()
+NEWS_WORLD_CATEGORY = os.environ.get("NEWS_WORLD_CATEGORY", "general").strip()
 
 # Auto-deploy webhook secret. When set, /api/deploy accepts requests
 # that present this value in the X-Deploy-Secret header and runs
