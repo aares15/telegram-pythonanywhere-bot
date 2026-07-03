@@ -69,6 +69,7 @@ def cmd_help(message):
         "/help — shows what i can do",
         "/reset — wipe our chat history and start clean",
         "/about — see what's running under the hood (model, storage, version)",
+        "/sha — show the live git commit SHA",
         "/compliment — get a little compliment to brighten your day",
         "/fact — get an interesting fact to make you curious",
         "/quote — get a motivational quote to inspire you",
@@ -108,6 +109,12 @@ def cmd_about(message):
     if COMMIT_SHA:
         lines.append(f"Version: {COMMIT_SHA}")
     bot.send_message(message.chat.id, "\n".join(lines))
+
+
+@bot.message_handler(commands=["sha"], func=is_allowed)
+def cmd_sha(message):
+    sha = COMMIT_SHA or "unknown"
+    bot.send_message(message.chat.id, f"Live SHA: {sha}")
 
 
 if HF_SPACE_ID:
@@ -249,7 +256,7 @@ def _send_news(message, header, fetch):
 @bot.message_handler(
     commands=["newsArmenia", "newsarmenia", "news_armenia", "news"], func=is_allowed
 )
-def cmd_news_Armenia(message):
+def cmd_news(message):
     _send_news(message, "📰 Top latest news in Armenia:", get_top_news)
 
 
