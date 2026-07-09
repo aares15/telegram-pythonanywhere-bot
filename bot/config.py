@@ -89,11 +89,29 @@ HF_SPACE_ID = os.environ.get("HF_SPACE_ID", "").strip()
 HF_TOKEN = os.environ.get("HF_TOKEN", "").strip()  # optional, for private spaces
 DEFAULT_PROVIDER = "main"
 
-# Storage — optional. When SQLITE_PATH is unset the bot runs in
-# stateless mode: history / rate limiting / preferences / dedupe all
-# degrade gracefully (the consumer modules in bot/ check `store is
-# None` at the top of every function and return safe defaults).
+# Storage — optional. Backend selection (bot/clients.py) prefers Redis, then
+# SQLite, then stateless:
+#   1. Redis (Upstash REST) — set REDIS_REST_URL + REDIS_REST_TOKEN. This is
+#      the backend for serverless hosts (Vercel) where SQLite can't persist.
+#   2. SQLite — set SQLITE_PATH to a file on a persistent disk (PythonAnywhere).
+#   3. Stateless — none set: history / rate limiting / preferences / dedupe all
+#      degrade gracefully (the consumer modules check `store is None` and return
+#      safe defaults).
 SQLITE_PATH = os.environ.get("SQLITE_PATH", "").strip()
+
+# Upstash Redis REST credentials. Accept the several env-var names the various
+# Vercel/Upstash integrations inject (Upstash marketplace uses UPSTASH_*, the
+# older Vercel KV uses KV_REST_API_*) so memory works whichever way it's wired.
+REDIS_REST_URL = (
+    os.environ.get("UPSTASH_REDIS_REST_URL")
+    or os.environ.get("KV_REST_API_URL")
+    or ""
+).strip()
+REDIS_REST_TOKEN = (
+    os.environ.get("UPSTASH_REDIS_REST_TOKEN")
+    or os.environ.get("KV_REST_API_TOKEN")
+    or ""
+).strip()
 
 # Label shown by the /about command. Defaults to "PythonAnywhere" since
 # that is the documented deployment target. Override to suit your host.

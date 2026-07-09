@@ -392,7 +392,7 @@ telegram-pythonanywhere-bot/
 ├── bot/
 │   ├── config.py         # All env vars and constants
 │   ├── clients.py        # bot, ai, store instances (store is optional)
-│   ├── store.py          # SqliteStore — KV with TTL, backed by sqlite3
+│   ├── store.py          # KV with TTL — SqliteStore (disk) + RedisStore (Upstash REST, for serverless)
 │   ├── ai.py             # ask_ai orchestration — history, optional grounding context, AI dispatch
 │   ├── providers.py      # Provider dispatch: OpenAI-compatible (with retry) or HF Gradio space
 │   ├── lookup.py         # /lookup — Wikipedia grounding for world topics; Armenian sources for Armenian topics

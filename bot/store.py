@@ -28,6 +28,8 @@ import threading
 import time
 from typing import Optional
 
+import requests
+
 
 class SqliteStore:
     _SCHEMA = """
@@ -145,3 +147,74 @@ class SqliteStore:
                 "UPDATE kv SET expires_at = ? WHERE key = ?",
                 (self._now() + ex, key),
             )
+
+
+class RedisStore:
+    """The same six-op KV-with-TTL interface as SqliteStore, backed by the
+    Upstash Redis REST API. A drop-in backend selected in bot/clients.py.
+
+    Why REST (not a redis:// TCP client): serverless functions (Vercel) are
+    short-lived and can't hold a pooled TCP connection, and SQLite can't
+    persist on their read-only / ephemeral disk. Upstash's HTTP REST API is
+    stateless per request, so it fits serverless — and each op below is a
+    single Redis command whose semantics match the SQLite implementation
+    exactly (INCR creates-at-1 and keeps TTL; SET NX = claim-if-absent).
+
+    The REST protocol: POST the base URL a JSON array `["SET","k","v","EX",
+    "60"]` with a Bearer token; the reply is `{"result": ...}` on success or
+    `{"error": ...}` on failure. Errors raise — bot/history.py, rate_limit.py,
+    preferences.py and dedupe.py already wrap every store call in try/except
+    and fall back to safe defaults, so a transient Upstash blip degrades
+    gracefully instead of crashing the handler.
+    """
+
+    def __init__(self, url: str, token: str, timeout: int = 10) -> None:
+        self._url = url.rstrip("/")
+        self._headers = {"Authorization": f"Bearer {token}"}
+        self._timeout = timeout
+        # Validate URL + token once at init so a misconfiguration falls back to
+        # stateless mode (via clients._init_redis) with a single clear log
+        # line, instead of erroring on every request.
+        if self._cmd("PING") != "PONG":
+            raise RuntimeError("Upstash PING did not return PONG")
+
+    def _cmd(self, *args):
+        resp = requests.post(
+            self._url,
+            headers=self._headers,
+            json=[str(a) for a in args],
+            timeout=self._timeout,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+        if "error" in payload:
+            raise RuntimeError(f"Upstash error: {payload['error']}")
+        return payload.get("result")
+
+    def get(self, key: str) -> Optional[str]:
+        return self._cmd("GET", key)
+
+    def set(self, key: str, value: str, ex: Optional[int] = None) -> None:
+        if ex:
+            self._cmd("SET", key, value, "EX", ex)
+        else:
+            self._cmd("SET", key, value)
+
+    def set_nx(self, key: str, value: str, ex: Optional[int] = None) -> bool:
+        """SET key value NX [EX ex] — set only if absent. Redis auto-drops
+        expired keys, so an expired entry counts as absent (matching
+        SqliteStore.set_nx). Returns True iff we won the claim."""
+        if ex:
+            result = self._cmd("SET", key, value, "EX", ex, "NX")
+        else:
+            result = self._cmd("SET", key, value, "NX")
+        return result == "OK"
+
+    def delete(self, key: str) -> None:
+        self._cmd("DEL", key)
+
+    def incr(self, key: str) -> int:
+        return int(self._cmd("INCR", key))
+
+    def expire(self, key: str, ex: int) -> None:
+        self._cmd("EXPIRE", key, ex)

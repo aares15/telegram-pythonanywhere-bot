@@ -22,7 +22,7 @@ telegram-pythonanywhere-bot/
 │   ├── __init__.py
 │   ├── config.py         # All env vars and constants (edit this to configure the bot)
 │   ├── clients.py        # Instantiates bot, ai, store (do not edit unless adding a client)
-│   ├── store.py          # SqliteStore — KV with lazy TTL expiry, backed by sqlite3
+│   ├── store.py          # KV-with-TTL: SqliteStore (persistent disk) + RedisStore (Upstash REST, for serverless/Vercel)
 │   ├── ai.py             # ask_ai() — history + dispatch to providers
 │   ├── providers.py      # Provider dispatch: OpenAI-compatible (with retry) or HF Gradio space
 │   ├── news.py           # get_top_news() (Armenia search) + get_world_news() (world top-headlines) — /newsArmenia and /newsWorldwide
@@ -44,6 +44,8 @@ telegram-pythonanywhere-bot/
 │   ├── test_rate_limit.py
 │   ├── test_dedupe.py
 │   ├── test_store.py     # Direct SqliteStore tests (get/set/delete/incr/expire + TTL)
+│   ├── test_redis_store.py # RedisStore (Upstash REST) command mapping + PING-on-init
+│   ├── test_clients.py   # Store backend selection (_init_redis / _init_store precedence)
 │   ├── test_news.py      # get_top_news() parsing + /news handler
 │   ├── test_lookup.py    # is_armenian_topic() routing, wiki_lookup() parsing, /lookup handler, ask_ai context grounding
 │   ├── test_deploy.py    # /api/deploy auto-deploy webhook (secret verification + git pull)
@@ -84,7 +86,8 @@ telegram-pythonanywhere-bot/
 |---|---|---|---|
 | `TELEGRAM_BOT_TOKEN` | Yes | — | From @BotFather on Telegram |
 | `AI_API_KEY` | Yes | — | API key for the AI provider |
-| `SQLITE_PATH` | No | — | Absolute path to a SQLite DB file. When set, enables history / rate limit / preferences / dedupe. When unset, bot runs in **stateless mode**. On PA use `/home/<your-pa-username>/bot.db` |
+| `SQLITE_PATH` | No | — | Absolute path to a SQLite DB file (persistent-disk hosts like PA — `/home/<your-pa-username>/bot.db`). Enables history / rate limit / preferences / dedupe / quiz. **Does not work on Vercel** (read-only FS) — use Redis there. Ignored when `REDIS_REST_*` is set |
+| `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` | No | — | Upstash Redis REST credentials. When both set, the bot uses `RedisStore` — the storage backend for serverless hosts (Vercel) where SQLite can't persist. Takes precedence over `SQLITE_PATH`. The names `KV_REST_API_URL` / `KV_REST_API_TOKEN` are also accepted (older Vercel KV integration). On Vercel, create an Upstash Redis from the Storage/Marketplace tab and it injects these automatically |
 | `AI_BASE_URL` | No | `https://api.cerebras.ai/v1` | Any OpenAI-compatible base URL |
 | `AI_MODEL` | No | `gpt-oss-120b` | Model name for the provider |
 | `HF_SPACE_ID` | No | — | Hugging Face Gradio space ID (e.g. `edisimon/armgpt-demo`) — enables `/model` command when set |
@@ -183,10 +186,11 @@ When `WEBHOOK_SECRET` is set, `api/index.py` checks the `X-Telegram-Bot-Api-Secr
 
 ## Storage
 
-The bot's storage layer is a thin KV-with-TTL abstraction in `bot/store.py` exposing five operations: `get / set / delete / incr / expire`. Only one backend exists: **`SqliteStore`** — a file-backed sqlite3 with lazy TTL expiry.
+The bot's storage layer is a thin KV-with-TTL abstraction in `bot/store.py` exposing six operations: `get / set / set_nx / delete / incr / expire`. Two interchangeable backends implement it; `bot/clients.py::store` selects one at boot with the precedence **Redis → SQLite → stateless**:
 
-- **`SQLITE_PATH` unset (stateless mode):** `bot/clients.py` sets `store = None` and prints a one-line startup notice. Each consumer (`history`, `rate_limit`, `preferences`, `dedupe`) checks for `None` at the top of every function and returns safe defaults: history is empty, rate limiting is skipped, `get_provider` returns `DEFAULT_PROVIDER`, `set_provider` returns `False`, dedupe is a no-op. This is the intended Day-1 teaching mode — kids can run the bot locally with only a Telegram token and an AI API key.
-- **`SQLITE_PATH` set:** `SqliteStore` opens the DB in WAL mode with `check_same_thread=False`. The schema is a single `kv(key, value, expires_at)` table; expired rows are filtered on read and overwritten on write — no background sweeper, never affects correctness.
+- **`RedisStore` (Upstash REST) — the serverless / Vercel backend.** Selected when `REDIS_REST_URL` + `REDIS_REST_TOKEN` are set (read from `UPSTASH_REDIS_REST_*` or `KV_REST_API_*` — whichever the Vercel/Upstash integration injects). Each op is one Redis command over Upstash's HTTP REST API (`POST` a `["SET","k","v","EX","60"]` array, Bearer auth), so it works where a persistent TCP connection can't and where SQLite can't persist (Vercel's read-only, ephemeral disk). Command semantics were chosen to match `SqliteStore` exactly (`INCR` creates-at-1 and keeps TTL; `SET … NX` = claim-if-absent). `__init__` sends a `PING` so a bad URL/token fails fast at boot and falls back to the next backend.
+- **`SqliteStore` — the persistent-disk / PythonAnywhere backend.** Selected when `REDIS_REST_*` is absent but `SQLITE_PATH` is set. Opens the DB in WAL mode with `check_same_thread=False`. The schema is a single `kv(key, value, expires_at)` table; expired rows are filtered on read and overwritten on write — no background sweeper, never affects correctness. **Does not work on Vercel** (read-only FS → init fails → falls through to stateless).
+- **Stateless mode (neither configured):** `store = None`. Each consumer (`history`, `rate_limit`, `preferences`, `dedupe`, `quiz`) checks for `None` at the top of every function and returns safe defaults: history is empty, rate limiting is skipped, `get_provider` returns `DEFAULT_PROVIDER`, `set_provider` returns `False`, dedupe is a no-op, quiz scoring is skipped. This is the intended Day-1 teaching mode — kids can run the bot locally with only a Telegram token and an AI API key.
 - **Graceful degradation under runtime failure:** every store call in the consumer modules is wrapped in try-except. On failure: same fallbacks as stateless mode, plus an error log line.
 - **Performance vs. networked KV:** SQLite ops are in-process and take microseconds, vs. ~20–80ms per round-trip to a remote KV over HTTPS. The webhook reply latency for an average message is dominated by the AI call, not storage.
 

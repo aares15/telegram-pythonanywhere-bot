@@ -5,8 +5,15 @@ from urllib.parse import urlparse
 import telebot
 from openai import OpenAI
 
-from bot.config import AI_API_KEY, AI_BASE_URL, SQLITE_PATH, TELEGRAM_TOKEN
-from bot.store import SqliteStore
+from bot.config import (
+    AI_API_KEY,
+    AI_BASE_URL,
+    REDIS_REST_TOKEN,
+    REDIS_REST_URL,
+    SQLITE_PATH,
+    TELEGRAM_TOKEN,
+)
+from bot.store import RedisStore, SqliteStore
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN, threaded=False)
 ai = OpenAI(base_url=AI_BASE_URL, api_key=AI_API_KEY)
@@ -40,7 +47,29 @@ def _init_store(path: str):
         return None
 
 
-store = _init_store(SQLITE_PATH)
+def _init_redis(url: str, token: str):
+    """Initialize the Upstash Redis store, or None when it's not configured
+    or can't connect.
+
+    Like _init_store, a failure here (bad URL/token, network blip at boot)
+    must not crash the worker — it returns None so the caller falls through to
+    the next backend or stateless mode, logging one clear line.
+    """
+    if not (url and token):
+        return None
+    try:
+        s = RedisStore(url, token)
+        print("Using Upstash Redis store.")
+        return s
+    except Exception as e:
+        print(f"RedisStore init failed ({e}) — trying next backend.")
+        return None
+
+
+# Backend precedence: Redis (works on serverless / Vercel) → SQLite (persistent
+# disk / PythonAnywhere) → stateless. `or` short-circuits: _init_store only runs
+# (and prints its own status line) when Redis isn't configured.
+store = _init_redis(REDIS_REST_URL, REDIS_REST_TOKEN) or _init_store(SQLITE_PATH)
 
 
 class _LazyBotInfo:

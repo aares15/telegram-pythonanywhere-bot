@@ -32,3 +32,27 @@ def test_init_store_falls_back_to_none_when_init_raises():
         from bot.clients import _init_store
 
         assert _init_store("/tmp/bad.db") is None
+
+
+def test_init_redis_returns_none_when_unconfigured():
+    from bot.clients import _init_redis
+
+    assert _init_redis("", "") is None
+    assert _init_redis("https://x.upstash.io", "") is None
+    assert _init_redis("", "tok") is None
+
+
+def test_init_redis_returns_store_when_init_succeeds():
+    sentinel = object()
+    with patch("bot.clients.RedisStore", return_value=sentinel) as mock_cls:
+        from bot.clients import _init_redis
+
+        assert _init_redis("https://x.upstash.io", "tok") is sentinel
+        mock_cls.assert_called_once_with("https://x.upstash.io", "tok")
+
+
+def test_init_redis_falls_back_to_none_when_init_raises():
+    with patch("bot.clients.RedisStore", side_effect=RuntimeError("bad token")):
+        from bot.clients import _init_redis
+
+        assert _init_redis("https://x.upstash.io", "tok") is None
