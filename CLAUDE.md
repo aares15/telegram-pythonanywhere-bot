@@ -26,6 +26,7 @@ telegram-pythonanywhere-bot/
 │   ├── ai.py             # ask_ai() — history + dispatch to providers
 │   ├── providers.py      # Provider dispatch: OpenAI-compatible (with retry) or HF Gradio space
 │   ├── news.py           # get_top_news() (Armenia search) + get_world_news() (world top-headlines) — /newsArmenia and /newsWorldwide
+│   ├── lookup.py         # /lookup — Wikipedia grounding for world topics; Armenian topics answered from expertise + trusted Armenian source links (never Wikipedia)
 │   ├── preferences.py    # Per-user provider preference stored via store
 │   ├── history.py        # get/save/clear conversation history via store (graceful degradation)
 │   ├── rate_limit.py     # Per-user daily message rate limiting via store (graceful degradation)
@@ -44,6 +45,7 @@ telegram-pythonanywhere-bot/
 │   ├── test_dedupe.py
 │   ├── test_store.py     # Direct SqliteStore tests (get/set/delete/incr/expire + TTL)
 │   ├── test_news.py      # get_top_news() parsing + /news handler
+│   ├── test_lookup.py    # is_armenian_topic() routing, wiki_lookup() parsing, /lookup handler, ask_ai context grounding
 │   ├── test_deploy.py    # /api/deploy auto-deploy webhook (secret verification + git pull)
 │   └── test_webhook.py
 ├── .github/
@@ -98,6 +100,8 @@ telegram-pythonanywhere-bot/
 | `NEWS_WORLD_API_URL` | No | `https://gnews.io/api/v4/top-headlines` | **Worldwide** news endpoint (`/top-headlines`) used by `/newsWorldwide`. Returns ranked current headlines by category (no search term). Same JSON shape as `NEWS_API_URL` |
 | `NEWS_WORLD_CATEGORY` | No | `general` | Category for `/newsWorldwide`: `general` (top overall) or one of `world` / `nation` / `business` / `technology` / `entertainment` / `sports` / `science` / `health` |
 | `NEWS_LANG` | No | `en` | Article language passed to the news API (both commands) |
+| `WIKI_API_URL` | No | `https://en.wikipedia.org/w/api.php` | Wikipedia API endpoint for `/lookup` (world-history grounding). `*.wikipedia.org` IS on PA's free-tier outbound whitelist, so unlike `/news` this works on PA out of the box. Point at another language edition (e.g. `hy.wikipedia.org`) to change the source wiki |
+| `WIKI_USER_AGENT` | No | `HistoryTeacherBot/1.0 (Telegram teaching bot)` | User-Agent sent to the Wikipedia API — Wikipedia asks clients to identify themselves |
 | `DEPLOY_SECRET` | No | — | Enables `/api/deploy` auto-deploy webhook. Fail-closed: when unset, the endpoint returns 403. Generate with `openssl rand -hex 32` and set the same value as a GitHub repo secret named `DEPLOY_SECRET` so the workflow at `.github/workflows/deploy.yml` can call the endpoint |
 | `PA_WSGI_PATH` | No | _auto-detected_ | Absolute path of the PA WSGI file `/api/deploy` touches to reload the worker. Only needed when auto-detection fails (non-default PA layout / custom domain) — the deploy response says so explicitly when that happens |
 
@@ -152,6 +156,15 @@ To switch to a different HF space, change `HF_SPACE_ID` and confirm the target s
 **PA outbound-whitelist caveat for HF Spaces.** `gradio_client` first fetches the space config from `huggingface.co` (whitelisted) and then routes `predict()` calls to `<space-subdomain>.hf.space` (NOT explicitly whitelisted as of last check). If `/model hf` hangs or 403s on PA but works locally, that's almost certainly the cause — verify with `curl -I https://<space>.hf.space/` from a PA Bash console, and if blocked, request `*.hf.space` on the PA forum whitelist thread. `bot/providers.py::_call_hf` passes `httpx_kwargs={"timeout": HF_REQUEST_TIMEOUT}` so a blocked subdomain fails fast instead of wedging the worker.
 
 ---
+
+## History source lookup (`/lookup`)
+
+`/lookup <topic>` (alias `/wiki`) answers a history question grounded in a real, citable source instead of the model's memory alone. `bot/lookup.py` routes by topic:
+
+- **World-history topics** → `wiki_lookup()` makes one Wikipedia API call (`generator=search` + `prop=extracts|info`) to fetch the top hit's plain-text intro (capped at `WIKI_MAX_EXTRACT` chars) and canonical URL. The extract is passed to `ask_ai(..., context=...)` as a grounding system message, and the reply cites the article. Wikipedia is whitelisted on PA, so this works on PA and Vercel alike.
+- **Armenian-history topics** → deliberately **never** sourced from Wikipedia (a product decision). `is_armenian_topic()` does a transparent case-insensitive substring match against `ARMENIAN_TOPIC_KEYWORDS` (extend that list in `bot/config.py` to widen coverage). Matches are answered from the teacher's own expertise, with a "further reading" block linking `ARMENIAN_SOURCES` (Armeniapedia, 100years100facts.com, Armenian-History.com). Those sites are **not** whitelisted on PA and some block bots (Armeniapedia sits behind a MyWikis anti-bot challenge), so the bot links to them rather than fetching them. The filter errs toward catching Armenian topics — a false positive only costs a Wikipedia citation, whereas a miss would route an Armenian topic to Wikipedia, which is what we're avoiding. A **safety net** re-checks the returned Wikipedia article's title with `is_armenian_topic()` and falls back to the Armenian path if a topic slipped past the keyword filter.
+
+`ask_ai()` gained an optional `context` parameter: grounding text sent to the model for one call only, **not** persisted to conversation history (the extract is large and re-fetchable; persisting it would bloat the rolling `MAX_HISTORY` window). The user turn and assistant reply are still saved, so follow-ups work. The HF provider ignores `context` (it only sees the last user message) — consistent with its other limitations.
 
 ## Webhook verification
 

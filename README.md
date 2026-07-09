@@ -393,8 +393,9 @@ telegram-pythonanywhere-bot/
 │   ├── config.py         # All env vars and constants
 │   ├── clients.py        # bot, ai, store instances (store is optional)
 │   ├── store.py          # SqliteStore — KV with TTL, backed by sqlite3
-│   ├── ai.py             # ask_ai orchestration — history, AI dispatch
+│   ├── ai.py             # ask_ai orchestration — history, optional grounding context, AI dispatch
 │   ├── providers.py      # Provider dispatch: OpenAI-compatible (with retry) or HF Gradio space
+│   ├── lookup.py         # /lookup — Wikipedia grounding for world topics; Armenian sources for Armenian topics
 │   ├── preferences.py    # Per-user provider preference (via store)
 │   ├── history.py        # Conversation memory (via store, graceful degradation)
 │   ├── rate_limit.py     # Per-user rate limiting (via store, graceful degradation)
@@ -449,6 +450,7 @@ make deploy-pa  # one-command PythonAnywhere deploy (see "Fast path" in Part 2)
 | `/reset` | Clear your conversation history |
 | `/about` | Show model, storage, and hosting info |
 | `/sha` | Show the live git commit SHA |
+| `/lookup <topic>` | Look up a history topic from a real source — world topics are grounded in a cited Wikipedia article; Armenian topics are answered from the teacher's expertise plus links to trusted Armenian sources (never Wikipedia) |
 | `/newsArmenia` | Top 3 latest news in Armenia (only available when `NEWS_API_KEY` is set) |
 | `/newsWorldwide` | Top 3 interesting news around the world (only available when `NEWS_API_KEY` is set) |
 | `/model` | Switch AI provider (only available when `HF_SPACE_ID` is set) |

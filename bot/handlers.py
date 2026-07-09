@@ -12,6 +12,7 @@ from bot.config import (
 from bot.ai import ask_ai
 from bot.helpers import is_allowed, keep_typing, send_reply, should_respond
 from bot.history import clear_history
+from bot.lookup import further_reading, is_armenian_topic, wiki_lookup
 from bot.news import get_top_news, get_world_news, news_configured
 from bot.notes import delete_note, get_note, save_note
 from bot.preferences import get_provider, set_provider
@@ -66,16 +67,20 @@ def _log(message, direction: str, text: str) -> None:
 def cmd_start(message):
     bot.send_message(
         message.chat.id,
-        "Hey, I'm your AI assistant🤖 — ask me anything and I'll give you a "
-        "straight, clear answer🫡:"
+        "Բարև! 👋 I'm your history teacher bot 📜 — a friendly guide to the "
+        "past, with a special love for Armenian history (from ancient Urartu "
+        "all the way to modern Armenia) and plenty to say about world history "
+        "too. Ask me about a date, a person, an event — or anything else on "
+        "your mind — and I'll explain it clearly. What are you curious about?"
     )
 
 
 @bot.message_handler(commands=["help"], func=is_allowed)
 def cmd_help(message):
     intro = (
-        "Hey, I'm your AI assistant🤖 — ask me anything and I'll give you a "
-        "straight, clear answer🫡. Here's what I can do for you:"
+        "Բարև! 👋 I'm your history teacher bot 📜 — ask me about Armenian "
+        "history or anything from the wider past, and I'll explain it clearly "
+        "and cheer on your questions. Here's what I can do for you:"
     )
     lines = [
         intro,
@@ -85,6 +90,7 @@ def cmd_help(message):
         "/reset — wipe our chat history and start clean",
         "/about — see what's running under the hood (model, storage, version)",
         "/sha — show the live git commit SHA",
+        "/lookup <topic> — look up a history topic from a real source 📚",
         "/quiz [topic] — start a trivia quiz (auto-scored) 🧠",
         "/leaderboard — see the top quiz scorers in this chat",
         "/subscribe — get a daily quiz here each morning (/unsubscribe to stop)",
@@ -301,6 +307,54 @@ def cmd_forget(message):
             message.chat.id,
             "I couldn't clear your note right now — memory isn't set up for this bot.",
         )
+
+
+@bot.message_handler(commands=["lookup", "wiki"], func=is_allowed)
+def cmd_lookup(message):
+    """Look up a history topic from a real source.
+
+    World-history topics are grounded in a live Wikipedia article and cited.
+    Armenian-history topics are NEVER sourced from Wikipedia: the teacher
+    answers from its own expertise and points to trusted Armenian sources.
+    """
+    parts = (message.text or "").split(maxsplit=1)
+    topic = parts[1].strip() if len(parts) > 1 else ""
+    if not topic:
+        bot.send_message(
+            message.chat.id,
+            "Tell me what to look up, like: /lookup the Roman Empire",
+        )
+        return
+    with keep_typing(message.chat.id):
+        armenian = is_armenian_topic(topic)
+        article = None
+        if not armenian:
+            article = wiki_lookup(topic)
+            # Safety net: if the best Wikipedia hit is itself an Armenian-history
+            # article, don't source it from Wikipedia — fall back to the Armenian
+            # path (own expertise + trusted Armenian links).
+            if article and is_armenian_topic(article["title"]):
+                article, armenian = None, True
+
+        if armenian:
+            answer = ask_ai(message.from_user.id, topic)
+            reply = f"{answer}\n\n{further_reading()}"
+        elif article:
+            context = (
+                "Base your answer on this Wikipedia article extract. Stay "
+                "faithful to it and do not add facts it does not support. "
+                "Explain clearly for a young learner.\n\n"
+                f"Article: {article['title']}\n\n{article['extract']}"
+            )
+            answer = ask_ai(message.from_user.id, topic, context=context)
+            reply = (
+                f"{answer}\n\n📖 Source: {article['title']} (Wikipedia)\n"
+                f"{article['url']}"
+            )
+        else:
+            # Couldn't reach Wikipedia — answer from the teacher's own knowledge.
+            reply = ask_ai(message.from_user.id, topic)
+    send_reply(message, reply)
 
 
 # ── Daily Quiz Arena ─────────────────────────────────────────────────────────

@@ -127,6 +127,49 @@ NEWS_WORLD_API_URL = os.environ.get(
 ).strip()
 NEWS_WORLD_CATEGORY = os.environ.get("NEWS_WORLD_CATEGORY", "general").strip()
 
+# Wikipedia lookup (/lookup command). Grounds WORLD-history answers in the
+# intro of the best-matching Wikipedia article. Wikipedia (*.wikipedia.org) is
+# on PythonAnywhere's free-tier outbound whitelist, so unlike /news this works
+# on PA out of the box; on Vercel there is no whitelist at all. Wikipedia asks
+# API clients to send a descriptive User-Agent, so we set one.
+WIKI_API_URL = os.environ.get("WIKI_API_URL", "https://en.wikipedia.org/w/api.php").strip()
+WIKI_USER_AGENT = os.environ.get(
+    "WIKI_USER_AGENT",
+    "HistoryTeacherBot/1.0 (Telegram teaching bot)",
+).strip()
+WIKI_REQUEST_TIMEOUT = 15  # seconds — fail fast so a slow API can't wedge the worker
+WIKI_MAX_EXTRACT = 2000  # cap the article extract fed to the model (chars)
+
+# Armenian history is deliberately NOT sourced from Wikipedia. A /lookup whose
+# topic matches any of these keywords (case-insensitive substring) is answered
+# from the teacher's own expertise, and the bot points the student to the
+# dedicated Armenian sources in ARMENIAN_SOURCES instead. This is a simple,
+# transparent, extensible filter — add names/places/terms to widen it. It errs
+# toward catching Armenian topics: a false positive on a world topic only means
+# "answered without a Wikipedia citation", while a miss would route an Armenian
+# topic to Wikipedia, which is exactly what we want to avoid.
+ARMENIAN_TOPIC_KEYWORDS = [
+    "armenia", "armenian", "hayastan", "artsakh", "karabakh", "nagorno",
+    "yerevan", "urartu", "urartian", "ararat", "cilicia", "cilician",
+    "bagratid", "bagratuni", "rubenid", "orontid", "artaxiad", "artashesian",
+    "tigran", "tigranes", "trdat", "tiridates", "mamikonian", "avarayr",
+    "sardarapat", "sardarabad", "echmiadzin", "etchmiadzin", "ejmiatsin",
+    "lake van", "sasun", "sassoun", "zeitun", "musa dagh",
+    "medz yeghern", "aghet", "dashnak", "hnchak", "ramkavar",
+    "mesrop mashtots", "mashtots", "khorenatsi", "matenadaran", "khachkar",
+    "komitas", "khachaturian", "gregory the illuminator",
+    "pashinyan", "kocharyan", "sargsyan", "sarkisian", "ter-petrosyan",
+]
+# Trusted Armenian-history sources the bot recommends for further reading.
+# These are NOT on PA's outbound whitelist and some actively block bots
+# (Armeniapedia sits behind an anti-bot challenge), so the bot LINKS to them
+# for the student to read rather than fetching them programmatically.
+ARMENIAN_SOURCES = [
+    ("Armeniapedia — the online Armenia encyclopedia", "https://www.armeniapedia.org"),
+    ("100 Years, 100 Facts", "https://100years100facts.com"),
+    ("Armenian-History.com", "https://www.armenian-history.com"),
+]
+
 # Auto-deploy webhook secret. When set, /api/deploy accepts requests
 # that present this value in the X-Deploy-Secret header and runs
 # `git pull` + WSGI reload. When unset, /api/deploy returns 403 — the
