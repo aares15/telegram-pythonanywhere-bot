@@ -56,29 +56,31 @@ _BOOTSTRAPPED = [False]
 
 
 def _bootstrap_once() -> None:
-    """Register the Telegram webhook + "/" command menu, once per warm instance.
+    """Sync the Telegram "/" command menu once per warm instance.
 
-    Vercel has no persistent "boot" step (unlike a long-lived WSGI worker), so
-    this is the serverless analog: the first authenticated webhook after a cold
-    start (re)asserts the webhook URL and syncs the "/" command menu with the
-    current handlers. That's what keeps stale commands out of Telegram's menu
-    after they're deleted from the code.
+    Vercel has no persistent "boot" step, so this is the serverless analog: the
+    first authenticated webhook after a cold start calls register_commands() to
+    keep Telegram's "/" menu in step with the current handlers (stale commands
+    disappear after they're deleted from the code).
 
-    Runs at most once per instance and never raises — a registration failure
-    must not drop the user's message. The flag is set BEFORE the attempt so a
-    persistent failure doesn't add latency to every request; a fresh instance
-    (Vercel spins these up often) will try again, so it self-heals.
+    It deliberately does NOT (re)register the webhook. The webhook is set once by
+    hand (see README) and must never be overwritten from inside the request path:
+    a missing or stale WEBHOOK_URL env var would silently re-point Telegram away
+    from this endpoint and take the whole bot offline.
+
+    Runs at most once per instance (flag set BEFORE the attempt so a persistent
+    failure doesn't add latency to every request; a fresh instance retries) and
+    never raises — a failure must not drop the user's message.
     """
     if _BOOTSTRAPPED[0]:
         return
     _BOOTSTRAPPED[0] = True
     try:
-        from bot.clients import register_commands, register_webhook
+        from bot.clients import register_commands
 
-        print(register_webhook())
         print(register_commands())
     except Exception as e:
-        print(f"Bootstrap registration failed: {e}")
+        print(f"Command-menu sync failed: {e}")
 
 
 @app.route("/api/webhook", methods=["POST"])
@@ -111,7 +113,8 @@ def webhook():
     import bot.handlers  # noqa: F401 — registers @bot.message_handler decorators
     from bot.clients import bot
 
-    # Sync webhook + command menu once per cold start (Vercel has no boot step).
+    # Sync the "/" command menu once per cold start (Vercel has no boot step).
+    # Does NOT touch the webhook — that's set once by hand (see README).
     _bootstrap_once()
 
     raw = request.get_data(as_text=True)

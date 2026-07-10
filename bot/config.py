@@ -78,9 +78,11 @@ def _bootstrap_webhook_secret(file_path: Path = _WEBHOOK_SECRET_FILE) -> str:
 TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"].strip()
 WEBHOOK_SECRET = _bootstrap_webhook_secret()
 
-# When set, the bot re-asserts this URL as the Telegram webhook on the first
-# request after each cold start (api/index.py::_bootstrap_once). Leave unset for
-# local polling (run_local.py). Example value on Vercel:
+# Target URL for the register_webhook() helper. On Vercel the webhook is set
+# once BY HAND (see README) and is NOT auto-registered from the request path —
+# a stale value here must never be able to re-point Telegram away from the live
+# endpoint. register_webhook() is only useful for manual/persistent-disk setups.
+# Leave unset for local polling (run_local.py). Example value on Vercel:
 #   WEBHOOK_URL=https://<your-project>.vercel.app/api/webhook
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "").strip()
 

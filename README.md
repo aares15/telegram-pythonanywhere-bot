@@ -186,7 +186,7 @@ If you hadn't filled in `WEBHOOK_URL` yet, add it now under **Settings → Envir
 
 ## Step 11 — Point Telegram at your bot (one-time `setWebhook`)
 
-Telegram needs to be told your bot's webhook URL once. (After this, the bot re-asserts the webhook itself on every cold start — but that first registration has to be done by hand, because until the webhook exists no request ever reaches the function.)
+Telegram needs to be told your bot's webhook URL. On Vercel this is a **one-time manual step** — the bot never re-registers the webhook itself (doing that from a serverless request, off a possibly-stale env var, could silently point Telegram at the wrong place and take the bot offline). Set it once here; it stays until you change it.
 
 Run this from your laptop, substituting your token, domain, and the `WEBHOOK_SECRET` you set in Step 8:
 
@@ -207,9 +207,9 @@ Now open Telegram, find your bot, and send it a message. Replies come from Verce
 
 Nothing to set up — this is how Vercel's Git integration works by default. Every push to `main` triggers a new deployment; when it goes live, `/api/health` reports the new commit ID.
 
-The first `/api/webhook` request after each new deploy also re-asserts the webhook and re-syncs the bot's `/` command menu with your current commands (via `_bootstrap_once()` in `api/index.py`), so a command you add or remove shows up in Telegram's `/` menu automatically. (Telegram caches the menu client-side briefly — fully restart the Telegram app if you don't see the change right away.)
+The first `/api/webhook` request after each new deploy re-syncs the bot's `/` command menu with your current commands (via `_bootstrap_once()` in `api/index.py`), so a command you add or remove shows up in Telegram's `/` menu automatically — **send the bot a message after a deploy to trigger it.** (Telegram caches the menu client-side briefly — fully restart the Telegram app if you don't see the change right away.) This never touches the webhook itself; the webhook stays exactly as you set it in Step 11.
 
-> **Preview vs. production.** Only set your bot token in the **Production** environment. Vercel also builds a unique URL for every branch/PR ("preview" deployments); you don't want those re-registering the webhook against your one bot token. Keeping the token production-only avoids that.
+> **Preview vs. production.** Only set your bot token in the **Production** environment. Vercel also builds a unique URL for every branch/PR ("preview" deployments); keeping the token production-only means only production ever talks to your bot.
 
 ---
 
@@ -233,7 +233,7 @@ The workflow runs each morning (and you can trigger it manually from the **Actio
 
 ## Secure the webhook
 
-Set `WEBHOOK_SECRET` as a Vercel environment variable (Step 8). The bot registers it with Telegram (via the `setWebhook` call in Step 11 and on every cold start) and rejects any incoming request whose `X-Telegram-Bot-Api-Secret-Token` header doesn't match — forged updates get a 403.
+Set `WEBHOOK_SECRET` as a Vercel environment variable (Step 8), and pass the same value as `secret_token` in the `setWebhook` call (Step 11). The bot then rejects any incoming request whose `X-Telegram-Bot-Api-Secret-Token` header doesn't match — forged updates get a 403. Keep the two in sync: if you change `WEBHOOK_SECRET`, re-run `setWebhook` with the new value, or Telegram's requests will start getting 403'd and the bot goes silent.
 
 > **Local-dev convenience:** when you run the bot locally and *don't* set `WEBHOOK_SECRET`, it auto-generates a 64-hex-character secret and saves it to `.webhook_secret` (gitignored, mode `0600`) so local runs are signed too. That file can't persist on Vercel's read-only filesystem, which is why production relies on the env var instead.
 

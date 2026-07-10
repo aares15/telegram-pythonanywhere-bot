@@ -161,30 +161,30 @@ def test_webhook_uses_compare_digest():
         assert result == ("Forbidden", 403)
 
 
-def test_bootstrap_once_registers_webhook_and_commands_once():
-    """Vercel has no boot step, so the first authenticated webhook per cold
-    start (re)registers the webhook + '/' command menu — and only once per
-    warm instance."""
+def test_bootstrap_once_syncs_commands_only_once():
+    """The cold-start hook syncs the '/' command menu once per warm instance —
+    and must NOT touch the webhook (re-registering it from the request path with
+    a stale WEBHOOK_URL would take the bot offline)."""
     import api.index as idx
 
     idx._BOOTSTRAPPED[0] = False
     with (
-        patch("bot.clients.register_webhook", return_value="wh") as mock_wh,
         patch("bot.clients.register_commands", return_value="cmd") as mock_cmd,
+        patch("bot.clients.register_webhook") as mock_wh,
     ):
         idx._bootstrap_once()
         idx._bootstrap_once()  # second call is a no-op
-        mock_wh.assert_called_once()
         mock_cmd.assert_called_once()
+        mock_wh.assert_not_called()
     idx._BOOTSTRAPPED[0] = False  # reset so it doesn't leak into other tests
 
 
 def test_bootstrap_once_never_raises_on_failure():
-    """A registration failure must not drop the user's message."""
+    """A command-sync failure must not drop the user's message."""
     import api.index as idx
 
     idx._BOOTSTRAPPED[0] = False
-    with patch("bot.clients.register_webhook", side_effect=RuntimeError("boom")):
+    with patch("bot.clients.register_commands", side_effect=RuntimeError("boom")):
         idx._bootstrap_once()  # must not raise
     idx._BOOTSTRAPPED[0] = False
 
