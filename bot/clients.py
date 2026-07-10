@@ -66,8 +66,8 @@ def _init_redis(url: str, token: str):
         return None
 
 
-# Backend precedence: Redis (works on serverless / Vercel) → SQLite (persistent
-# disk / PythonAnywhere) → stateless. `or` short-circuits: _init_store only runs
+# Backend precedence: Redis (works on serverless / Vercel) → SQLite (local dev /
+# persistent-disk hosts) → stateless. `or` short-circuits: _init_store only runs
 # (and prints its own status line) when Redis isn't configured.
 store = _init_redis(REDIS_REST_URL, REDIS_REST_TOKEN) or _init_store(SQLITE_PATH)
 
@@ -76,11 +76,11 @@ class _LazyBotInfo:
     """Defers `bot.get_me()` until first attribute access; caches the
     result; retries transient failures.
 
-    Why this exists: PA's outbound HTTPS proxy occasionally returns 503
-    for a few seconds. If `get_me()` ran at module load, a single
-    proxy blip would prevent the WSGI worker from booting at all. With
-    lazy access, the worker comes up regardless and individual requests
-    that need the bot's username retry up to 3 times with backoff.
+    Why this exists: a Telegram API blip (a few seconds of 5xx/network
+    error) at import time would otherwise take down the whole function
+    cold start. With lazy access, the app comes up regardless and
+    individual requests that need the bot's username retry up to 3 times
+    with backoff.
 
     Thread safety: `_load()` is guarded by a class-level lock with a
     double-check so concurrent first-accesses don't both call get_me().
@@ -123,7 +123,7 @@ def register_webhook() -> str:
     Idempotent — Telegram treats repeated setWebhook calls with the
     same URL as no-ops. Returns a status string for logging. Never
     raises: failures are caught so a bad token or network blip doesn't
-    crash worker boot.
+    crash the request that triggered the (re)registration.
 
     Validates WEBHOOK_URL before calling Telegram so a typo (missing
     scheme, http instead of https, missing path) fails fast with a
@@ -142,11 +142,9 @@ def register_webhook() -> str:
     if not parsed.path:
         return f"WEBHOOK_URL has no path; Telegram needs a real endpoint — skipping ({WEBHOOK_URL!r})"
 
-    # max_connections=1 serializes Telegram deliveries to the worker.
-    # bot/history.py + bot/preferences.py do read-modify-write against
-    # the SQLite store; without this, two quick messages from the same
-    # user can interleave and lose a turn. PA's single-worker free tier
-    # makes this cheap — at most one update in flight at a time anyway.
+    # max_connections=1 serializes Telegram deliveries. bot/history.py +
+    # bot/preferences.py do read-modify-write against the store; without this,
+    # two quick messages from the same user can interleave and lose a turn.
     # allowed_updates is set explicitly so poll_answer updates (quiz scoring)
     # are always delivered. Telegram's default set already includes them, but
     # this code never set it before — being explicit removes any doubt about a
@@ -160,10 +158,8 @@ def register_webhook() -> str:
     if WEBHOOK_SECRET:
         kwargs["secret_token"] = WEBHOOK_SECRET
 
-    # PA's outbound proxy 503-blips several times a day; a couple of
-    # retries ride it out. Seen live (2026-06-29): a boot-time
-    # registration failed on a blip and the bot ran on whatever webhook
-    # state Telegram already had until the next deploy re-asserted it.
+    # A couple of retries ride out a transient Telegram API blip so a single
+    # 5xx doesn't leave the webhook unregistered until the next cold start.
     result = None
     for attempt in range(3):
         try:
@@ -180,3 +176,56 @@ def register_webhook() -> str:
     if result is False:
         return f"Webhook registration: Telegram returned False for {WEBHOOK_URL}"
     return f"Webhook registered: {WEBHOOK_URL}"
+
+
+def register_commands() -> str:
+    """Register the bot's command list with Telegram via set_my_commands so the
+    "/" autocomplete menu matches the actual commands.
+
+    This is what removes STALE menu entries (e.g. old /news, /joke) after their
+    handlers are deleted from the code: the "/" menu lives on Telegram's servers
+    and never updates on its own. Called on the first webhook after each cold
+    start (api/index.py::_bootstrap_once) and at run_local.py startup.
+
+    Sets the DEFAULT scope, then clears the all-private-chats / all-group-chats
+    scopes. Telegram resolves the menu by most-specific scope first, so commands
+    left over under a narrower scope (a past BotFather / set_my_commands call)
+    would otherwise SHADOW our default list and the old menu would persist.
+    Deleting those scopes makes every chat fall back to the default we just set.
+
+    Idempotent and never raises — a bad token or a transient API blip must not
+    crash the request. Returns a status string for logging.
+    """
+    from telebot.types import (
+        BotCommand,
+        BotCommandScopeAllGroupChats,
+        BotCommandScopeAllPrivateChats,
+    )
+
+    from bot.commands import command_specs
+
+    commands = [BotCommand(name, desc) for (name, desc, _help) in command_specs()]
+
+    result = None
+    for attempt in range(3):
+        try:
+            result = bot.set_my_commands(commands)
+            break
+        except Exception as e:
+            if attempt == 2:
+                return f"Command registration failed: {e}"
+            print(f"set_my_commands attempt {attempt + 1}/3 failed, retrying: {e}")
+            time.sleep(1 + attempt)
+
+    if result is False:
+        return "Command registration: Telegram returned False"
+
+    # Clear narrower scopes so they can't shadow the default list above. A scope
+    # that was never set deletes as a harmless no-op.
+    for scope in (BotCommandScopeAllPrivateChats(), BotCommandScopeAllGroupChats()):
+        try:
+            bot.delete_my_commands(scope=scope)
+        except Exception as e:
+            print(f"delete_my_commands({type(scope).__name__}) failed (non-fatal): {e}")
+
+    return f"Registered {len(commands)} bot commands"

@@ -3,8 +3,8 @@ from unittest.mock import MagicMock, patch
 
 def test_health_reports_commit_sha():
     """/api/health returns "OK" or "OK <sha>". The SHA is captured at
-    import time, so it identifies the code the worker is actually
-    running — the deploy workflow polls it to verify a push went live."""
+    import time, so it identifies the code actually running — a reliable
+    "which commit is live?" probe."""
     import re
 
     from api.index import health
@@ -87,7 +87,7 @@ def test_webhook_dedupes_concurrently_claimed_update():
 
 
 def test_webhook_releases_dedupe_claim_when_processing_crashes():
-    """If the handler raises (e.g. a PA proxy blip killed the Telegram
+    """If the handler raises (e.g. a network blip killed the Telegram
     send), the dedupe claim must be released so Telegram's retry of the
     same update_id is processed instead of silently dropped — and the
     exception must propagate so Telegram sees a non-200 and retries."""
@@ -159,6 +159,34 @@ def test_webhook_uses_compare_digest():
 
         result = webhook()
         assert result == ("Forbidden", 403)
+
+
+def test_bootstrap_once_registers_webhook_and_commands_once():
+    """Vercel has no boot step, so the first authenticated webhook per cold
+    start (re)registers the webhook + '/' command menu — and only once per
+    warm instance."""
+    import api.index as idx
+
+    idx._BOOTSTRAPPED[0] = False
+    with (
+        patch("bot.clients.register_webhook", return_value="wh") as mock_wh,
+        patch("bot.clients.register_commands", return_value="cmd") as mock_cmd,
+    ):
+        idx._bootstrap_once()
+        idx._bootstrap_once()  # second call is a no-op
+        mock_wh.assert_called_once()
+        mock_cmd.assert_called_once()
+    idx._BOOTSTRAPPED[0] = False  # reset so it doesn't leak into other tests
+
+
+def test_bootstrap_once_never_raises_on_failure():
+    """A registration failure must not drop the user's message."""
+    import api.index as idx
+
+    idx._BOOTSTRAPPED[0] = False
+    with patch("bot.clients.register_webhook", side_effect=RuntimeError("boom")):
+        idx._bootstrap_once()  # must not raise
+    idx._BOOTSTRAPPED[0] = False
 
 
 def test_webhook_rejects_secret_before_loading_handlers():

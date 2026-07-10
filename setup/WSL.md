@@ -50,7 +50,7 @@ date -u            # confirm the clock looks right (see TLS note below)
 
 | Symptom | Fix |
 |---|---|
-| `gh auth login` / PythonAnywhere link **doesn't open a browser** | Copy the URL it prints into the Windows browser (Chrome/Edge) by hand and continue there. |
+| `gh auth login` / Vercel link **doesn't open a browser** | Copy the URL it prints into the Windows browser (Chrome/Edge) by hand and continue there. |
 | `./connect-claude-code.sh: bad interpreter` or `\r` errors | The script picked up Windows line endings. Run: `sed -i 's/\r$//' setup/connect-claude-code.sh && chmod +x setup/connect-claude-code.sh` |
 | HTTPS/TLS suddenly fails (after the PC slept) — `curl` to the gateway, GitHub, or Telegram errors out | The WSL clock drifted. Close Ubuntu, open **PowerShell**, run `wsl --shutdown`, then reopen Ubuntu. |
 | `claude: command not found` after install | Open a **new** Ubuntu terminal, or `export PATH="$HOME/.local/bin:$PATH"`. |
@@ -123,7 +123,7 @@ the workshop touches:
 
 ```bash
 for u in github.com api.github.com api.telegram.org \
-         www.pythonanywhere.com ai.simonian.online; do
+         vercel.com ai.simonian.online; do
   echo -n "$u -> "; curl -s -o /dev/null -w '%{http_code}\n' -m 10 "https://$u"
 done
 ```

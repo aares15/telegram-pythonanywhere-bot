@@ -55,22 +55,12 @@ The manual env-var commands (if you'd rather not use the script) are in
 
 ---
 
-## 3. Deploy to PythonAnywhere
+## 3. Deploy to Vercel
 
-For everyday updates, just `git push` to `main` — the GitHub Action deploys for you;
-no local script needed. For **first-time setup or recovery** from your machine:
-
-```powershell
-# Requires PowerShell 7+ (winget install Microsoft.PowerShell)
-.\make.ps1 deploy-pa
-```
-
-This reads `.env` (needs `PA_USERNAME` + `PA_API_TOKEN` in addition to the bot vars),
-creates/repairs the web app, uploads the `.env` + WSGI file, points the app at your
-clone + virtualenv, reloads, and health-checks. It's idempotent — safe to re-run.
-
-`.\make.ps1 deploy-pa` automatically uses `pwsh` (PowerShell 7) if you launched it
-from Windows PowerShell 5.1.
+Deployment is handled by Vercel's Git integration: connect the repo once at
+[vercel.com](https://vercel.com), set the environment variables, and every
+`git push` to `main` auto-deploys. See the README ("Deploy to Vercel") for the
+one-time setup. No local deploy script is needed.
 
 ---
 
@@ -79,7 +69,6 @@ from Windows PowerShell 5.1.
 | What you see | Fix |
 |---|---|
 | `running scripts is disabled on this system` | Run the `Set-ExecutionPolicy` line in step 0. |
-| `deploy-pa` says it needs version 7 | Install PowerShell 7: `winget install Microsoft.PowerShell`, then reopen the terminal as **pwsh**. |
 | `py`/`python` not found on `install` | Install Python 3.13 from python.org and tick "Add to PATH". |
 | `claude: command not found` after connect | Open a **new** terminal, or add `%USERPROFILE%\.local\bin` to PATH. |
 | Gateway `outside_workshop_hours` | Your key is fine — the gateway only opens during class hours. Re-run during the session. |

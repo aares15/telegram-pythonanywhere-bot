@@ -113,4 +113,4 @@ def cmd_echo(message):
 2. Send your new command to the bot in Telegram
 3. Verify it behaves as expected
 4. Test edge cases (empty input, invalid parameters, etc.)
-5. Deploy to PythonAnywhere to test in production
+5. Push to `main` — Vercel auto-deploys — to test in production

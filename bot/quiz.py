@@ -3,8 +3,8 @@ per-user daily streaks, and an optional daily broadcast.
 
 Design notes:
 - Question generation goes straight through ``bot.providers._call_main`` (the
-  Cerebras / OpenAI-compatible path — the only whitelisted AI on PA free tier).
-  We deliberately bypass ``bot.ai.ask_ai`` so quiz JSON never pollutes a user's
+  Cerebras / OpenAI-compatible path). We deliberately bypass ``bot.ai.ask_ai``
+  so quiz JSON never pollutes a user's
   conversation history, the chat persona system prompt doesn't leak in, and the
   ``/model hf`` preference (ArmGPT, a base model that can't emit JSON) is never
   used for quizzes.

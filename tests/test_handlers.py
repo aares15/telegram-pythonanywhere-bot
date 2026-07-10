@@ -186,29 +186,26 @@ def test_cmd_about_without_store():
         assert "stateless" in sent
 
 
-# ── /sha ─────────────────────────────────────────────────────────────────────
+# ── /start ────────────────────────────────────────────────────────────────────
 
 
-def test_cmd_sha_reports_live_commit_sha():
+def test_cmd_start_sends_welcome_and_command_list():
+    """/start greets the user AND follows up with the command list so new
+    users see what's available without having to discover /help first."""
     with (
         patch("bot.handlers.bot") as mock_bot,
-        patch("bot.handlers.COMMIT_SHA", "abc1234"),
+        patch("bot.handlers.HF_SPACE_ID", ""),
     ):
-        from bot.handlers import cmd_sha
+        from bot.handlers import cmd_start
 
-        cmd_sha(make_message())
-        mock_bot.send_message.assert_called_once_with(456, "Live SHA: abc1234")
-
-
-def test_cmd_sha_reports_unknown_when_git_sha_unavailable():
-    with (
-        patch("bot.handlers.bot") as mock_bot,
-        patch("bot.handlers.COMMIT_SHA", ""),
-    ):
-        from bot.handlers import cmd_sha
-
-        cmd_sha(make_message())
-        mock_bot.send_message.assert_called_once_with(456, "Live SHA: unknown")
+        cmd_start(make_message())
+        # Two messages: the welcome, then the command list.
+        assert mock_bot.send_message.call_count == 2
+        welcome = mock_bot.send_message.call_args_list[0][0][1]
+        listing = mock_bot.send_message.call_args_list[1][0][1]
+        assert "history teacher bot" in welcome
+        assert "/help" in listing
+        assert "/lookup" in listing
 
 
 # ── /model command ────────────────────────────────────────────────────────────
@@ -350,8 +347,6 @@ def test_handle_message_registered_last():
         "def cmd_quiz(",
         "def cmd_leaderboard(",
         "def cmd_subscribe(",
-        "def cmd_news(",
-        "def cmd_joke(",
         "def cmd_forget(",
     ):
         assert src.index(name) < hm, f"{name} must be defined before handle_message"

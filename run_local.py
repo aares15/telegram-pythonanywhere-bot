@@ -4,8 +4,8 @@ Run the bot locally via polling — no webhook needed.
 This is the SAME bot code that runs in production. The only difference is
 how Telegram delivers messages to us:
 
-    Production (PythonAnywhere): Telegram → POST /api/webhook → api/index.py
-    Local (this file):           we ask Telegram "any new messages?" in a loop
+    Production (Vercel): Telegram → POST /api/webhook → api/index.py
+    Local (this file):   we ask Telegram "any new messages?" in a loop
 
 Polling is perfect for learning and local development because you can
 edit a file, rerun this script, and see your changes instantly — no
@@ -85,7 +85,7 @@ def preflight() -> None:
 preflight()
 
 import bot.handlers  # noqa: F401  — registers all @bot.message_handler decorators
-from bot.clients import bot, BOT_INFO
+from bot.clients import bot, BOT_INFO, register_commands
 
 
 def main() -> None:
@@ -114,6 +114,10 @@ def main() -> None:
             return
         bot.remove_webhook()
         print("Webhook removed.\n")
+
+    # Sync the "/" command menu with the current handlers so stale entries
+    # (e.g. commands removed from the code) disappear from Telegram's menu.
+    print(register_commands())
 
     print("Send your bot a message on Telegram to try it out.")
     print("Press Ctrl+C to stop.\n")

@@ -1,33 +1,28 @@
-import glob
 import hmac
 import os
-import re
 import subprocess
-import sys
-
-try:
-    import fcntl  # POSIX advisory file locking (PythonAnywhere / Linux).
-except ImportError:  # pragma: no cover - Windows has no fcntl; deploy is PA-only.
-    fcntl = None
 
 from flask import Flask, request
 
 app = Flask(__name__)
 
-# Project root — used by /api/deploy to scope git commands and by
-# /api/health to report the deployed commit. api/index.py is at
-# <repo>/api/index.py, so two dirname() calls give us the repo root.
+# Project root — used by /api/health to report the deployed commit.
+# api/index.py is at <repo>/api/index.py, so two dirname() calls give the root.
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def _commit_sha() -> str:
-    """Short SHA of the checked-out commit, or "" when git is unavailable.
+    """Short SHA of the running commit, or "" when it can't be determined.
 
-    Computed once at import (= worker boot), so it reflects the code the
-    worker is actually RUNNING — not whatever a later `git pull` left on
-    disk. That makes /api/health the definitive "did the deploy go live?"
-    probe: the reported SHA changes only after a successful worker reload.
+    On Vercel the source is deployed without a usable .git at runtime, so we
+    prefer the VERCEL_GIT_COMMIT_SHA env var that Vercel injects at build time.
+    Falls back to `git rev-parse` for local dev / other hosts. Computed once at
+    import (= cold start), so /api/health reports the code actually RUNNING —
+    the definitive "which commit is live?" probe.
     """
+    sha = os.environ.get("VERCEL_GIT_COMMIT_SHA", "").strip()
+    if sha:
+        return sha[:7]
     try:
         result = subprocess.run(
             ["git", "-C", _PROJECT_ROOT, "rev-parse", "--short=7", "HEAD"],
@@ -52,6 +47,38 @@ def health():
     # Telegram/store/AI client init. Body is "OK <sha>" so one curl
     # answers both "is it up?" and "which commit is live?".
     return ("OK " + _COMMIT_SHA).strip(), 200
+
+
+# Module-level flags. Serverless functions cold-start per instance and re-run
+# module code each time; these live for the life of one warm instance.
+_WARNED_NO_WEBHOOK_SECRET = [False]
+_BOOTSTRAPPED = [False]
+
+
+def _bootstrap_once() -> None:
+    """Register the Telegram webhook + "/" command menu, once per warm instance.
+
+    Vercel has no persistent "boot" step (unlike a long-lived WSGI worker), so
+    this is the serverless analog: the first authenticated webhook after a cold
+    start (re)asserts the webhook URL and syncs the "/" command menu with the
+    current handlers. That's what keeps stale commands out of Telegram's menu
+    after they're deleted from the code.
+
+    Runs at most once per instance and never raises — a registration failure
+    must not drop the user's message. The flag is set BEFORE the attempt so a
+    persistent failure doesn't add latency to every request; a fresh instance
+    (Vercel spins these up often) will try again, so it self-heals.
+    """
+    if _BOOTSTRAPPED[0]:
+        return
+    _BOOTSTRAPPED[0] = True
+    try:
+        from bot.clients import register_commands, register_webhook
+
+        print(register_webhook())
+        print(register_commands())
+    except Exception as e:
+        print(f"Bootstrap registration failed: {e}")
 
 
 @app.route("/api/webhook", methods=["POST"])
@@ -80,8 +107,12 @@ def webhook():
 
     # Authenticated — now pull the heavyweight modules.
     import telebot
+
     import bot.handlers  # noqa: F401 — registers @bot.message_handler decorators
     from bot.clients import bot
+
+    # Sync webhook + command menu once per cold start (Vercel has no boot step).
+    _bootstrap_once()
 
     raw = request.get_data(as_text=True)
     try:
@@ -114,252 +145,6 @@ def webhook():
     return "OK", 200
 
 
-# Module-level flag so the WEBHOOK_SECRET unset warning logs once per
-# worker boot instead of on every request.
-_WARNED_NO_WEBHOOK_SECRET = [False]
-
-
-# Lock file path. fcntl.flock against this file serializes /api/deploy
-# calls so two concurrent GitHub Actions runs can't race `git pull` in
-# the same worktree.
-_DEPLOY_LOCK_PATH = os.path.join(_PROJECT_ROOT, ".deploy.lock")
-
-
-def _lock_deploy_nb(fd: int) -> None:
-    """Take an exclusive, non-blocking advisory lock on `fd`.
-
-    Raises BlockingIOError if another deploy already holds it. No-op on
-    platforms without fcntl (Windows): /api/deploy only runs on
-    PythonAnywhere/Linux, where overlapping GitHub Actions deploys are
-    the race this guards against. Keeping fcntl optional lets the test
-    suite (and a local dev install) import api.index on Windows.
-    """
-    if fcntl is None:
-        return
-    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-
-
-def _unlock_deploy(fd: int) -> None:
-    """Release the lock taken by _lock_deploy_nb. No-op without fcntl."""
-    if fcntl is None:
-        return
-    fcntl.flock(fd, fcntl.LOCK_UN)
-
-
-def _git(args: list, timeout: int) -> subprocess.CompletedProcess:
-    """Run a git command scoped to the project checkout."""
-    return subprocess.run(
-        ["git", "-C", _PROJECT_ROOT, *args],
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
-
-
-def _sync_requirements(old_sha: str, new_sha: str) -> tuple:
-    """Install dependencies when the deploy changed requirements.txt.
-
-    Without this, a push that adds a dependency reloads into a worker
-    that crashes on import — a deploy that "succeeded" but took the bot
-    down. Returns (status line for the response, ok flag); ok=False
-    means the caller must NOT reload the worker.
-    """
-    if not old_sha or not new_sha or old_sha == new_sha:
-        return "Dependencies: unchanged", True
-    diff = _git(["diff", "--name-only", f"{old_sha}..{new_sha}"], timeout=10)
-    if diff.returncode != 0 or "requirements.txt" not in diff.stdout.split():
-        return "Dependencies: unchanged", True
-    # sys.prefix is the active virtualenv (PEP 405) — uwsgi's
-    # sys.executable points at the uwsgi binary, so don't use that.
-    pip = os.path.join(sys.prefix, "bin", "pip")
-    if not os.path.exists(pip):
-        return (
-            "WARNING: requirements.txt changed but no venv pip found — "
-            "install dependencies manually",
-            True,
-        )
-    result = subprocess.run(
-        [pip, "install", "-r", os.path.join(_PROJECT_ROOT, "requirements.txt")],
-        capture_output=True,
-        text=True,
-        timeout=150,
-    )
-    if result.returncode != 0:
-        print(f"pip install failed (rc={result.returncode}):\n{result.stderr}")
-        return "pip install failed", False
-    return "Dependencies: installed from requirements.txt", True
-
-
-def _pa_wsgi_path() -> str:
-    """Return the PythonAnywhere WSGI file path for this account, or ""
-    if it can't be found. Touching that file is how PA reloads a web
-    app's worker, so a resolution failure means "deployed but never
-    restarted" — the caller reports it loudly instead of skipping
-    silently.
-
-    Resolution order:
-      1. PA_WSGI_PATH env var — explicit override for non-default layouts
-      2. $USER / $LOGNAME — present in PA's uwsgi workers today, but
-         uwsgi environments are minimal and this isn't guaranteed
-      3. pwd.getpwuid(os.getuid()) — POSIX, works with an empty env
-      4. the /home/<user>/ prefix of the project checkout path
-      5. a /var/www/*_pythonanywhere_com_wsgi.py glob — only if the
-         match is unambiguous, so we can't touch the wrong app's file
-    """
-    override = os.environ.get("PA_WSGI_PATH", "").strip()
-    if override:
-        return override if os.path.exists(override) else ""
-
-    users = []
-    env_user = os.environ.get("USER") or os.environ.get("LOGNAME") or ""
-    if env_user:
-        users.append(env_user)
-    try:
-        import pwd
-
-        users.append(pwd.getpwuid(os.getuid()).pw_name)
-    except (ImportError, AttributeError, KeyError, OSError):
-        pass  # Windows or exotic environment — try the next fallback
-    home_match = re.match(r"^/home/([^/]+)/", _PROJECT_ROOT + "/")
-    if home_match:
-        users.append(home_match.group(1))
-
-    for user in users:
-        candidate = f"/var/www/{user}_pythonanywhere_com_wsgi.py"
-        if os.path.exists(candidate):
-            return candidate
-
-    matches = glob.glob("/var/www/*_pythonanywhere_com_wsgi.py")
-    if len(matches) == 1:
-        return matches[0]
-    return ""
-
-
-@app.route("/api/deploy", methods=["POST"])
-def deploy():
-    """Auto-deploy webhook. Converges the checkout to origin's tip and
-    reloads the PA worker.
-
-    Verifies an X-Deploy-Secret header against DEPLOY_SECRET. Fail-closed:
-    returns 403 if the env var is unset, so a misconfigured deploy can't
-    accidentally allow arbitrary callers to trigger code execution.
-
-    Uses `git fetch` + `git reset --hard origin/<branch>` rather than
-    `git pull --ff-only`: a pull wedges permanently once the server-side
-    worktree diverges (a file edited via PA's Files tab, a force-pushed
-    branch, a half-finished recovery) and every deploy after that 500s
-    until someone fixes the checkout by hand while the bot silently keeps
-    running old code. Reset makes origin the single source of truth and
-    is idempotent, so retries are always safe. Untracked files (.env,
-    .webhook_secret, .deploy.lock) survive a reset — deliberately NO
-    `git clean` for that reason. The flip side: edits to TRACKED files
-    on the server are discarded by the next deploy; the PA checkout is a
-    deploy target, not a workspace.
-
-    Serialized via fcntl.flock so overlapping GitHub Actions runs or
-    replayed valid requests can't race git in the same worktree.
-    """
-    from bot.config import DEPLOY_SECRET
-
-    if not DEPLOY_SECRET:
-        return "Deploy endpoint disabled (DEPLOY_SECRET unset)", 403
-
-    provided = request.headers.get("X-Deploy-Secret", "")
-    if not hmac.compare_digest(provided, DEPLOY_SECRET):
-        return "Forbidden", 403
-
-    # Acquire exclusive lock. Non-blocking — if another deploy is
-    # in-flight we return 409 immediately rather than queueing up.
-    lock_fd = os.open(_DEPLOY_LOCK_PATH, os.O_CREAT | os.O_RDWR, 0o644)
-    locked = False
-    try:
-        try:
-            _lock_deploy_nb(lock_fd)
-            locked = True
-        except BlockingIOError:
-            return "Another deploy is in progress, try again shortly", 409
-
-        def fail(step: str, result) -> tuple:
-            # Don't echo raw stderr to the caller — it can leak local
-            # paths or remote details. Log server-side, return generic.
-            print(f"{step} failed (rc={result.returncode}):\n{result.stderr}")
-            return f"{step} failed (see server log for details)", 500
-
-        try:
-            old = _git(["rev-parse", "--short=7", "HEAD"], timeout=10)
-            old_sha = old.stdout.strip() if old.returncode == 0 else ""
-
-            head = _git(["rev-parse", "--abbrev-ref", "HEAD"], timeout=10)
-            branch = head.stdout.strip() if head.returncode == 0 else ""
-            if not branch or branch == "HEAD":  # detached or unreadable
-                branch = "main"
-
-            fetched = _git(["fetch", "origin"], timeout=60)
-            if fetched.returncode != 0:
-                return fail("git fetch", fetched)
-
-            reset = _git(["reset", "--hard", f"origin/{branch}"], timeout=30)
-            if reset.returncode != 0:
-                return fail("git reset", reset)
-
-            new = _git(["rev-parse", "--short=7", "HEAD"], timeout=10)
-            new_sha = new.stdout.strip() if new.returncode == 0 else ""
-
-            deps_line, deps_ok = _sync_requirements(old_sha, new_sha)
-            if not deps_ok:
-                # No WSGI touch: keep the old worker (old code + old
-                # deps) serving rather than reload into an ImportError.
-                return f"{deps_line} (see server log for details)", 500
-        except subprocess.TimeoutExpired:
-            return "git/pip command timed out", 504
-
-        # Re-register webhook in case WEBHOOK_URL or WEBHOOK_SECRET
-        # changed, or a local polling session cleared the registration.
-        # Best-effort: never fail the deploy on a webhook registration
-        # error since the worker reload below will retry it at boot.
-        try:
-            from bot.clients import register_webhook
-
-            webhook_line = register_webhook()
-        except Exception as e:
-            webhook_line = f"Webhook registration failed: {e}"
-
-        # Touch the PA WSGI file so uwsgi gracefully replaces the worker —
-        # that's the moment the fetched code actually goes live. This is
-        # the step whose silent failure used to read as "deployed but the
-        # bot didn't change", so its outcome is always reported.
-        wsgi_path = _pa_wsgi_path()
-        if not wsgi_path:
-            reload_line = (
-                "WARNING: WSGI file not found — code updated on disk but "
-                "the worker was NOT restarted. Set PA_WSGI_PATH in .env to "
-                "the WSGI file path shown on the PA Web tab."
-            )
-        else:
-            try:
-                os.utime(wsgi_path, None)
-                reload_line = f"Reload: touched {wsgi_path}"
-            except OSError as e:
-                reload_line = (
-                    f"WARNING: reload touch failed ({e}) — code updated "
-                    "on disk but the worker was NOT restarted."
-                )
-
-        summary = f"Deployed: {old_sha or '?'} -> {new_sha or '?'} (branch {branch})"
-        body = "\n".join(["OK", summary, deps_line, webhook_line, reload_line])
-        return body + "\n", 200
-    finally:
-        # Release lock (if we acquired it) + close fd. Don't unlink the
-        # lockfile — leave it for next deploy. Swallow errors from
-        # LOCK_UN so they can't mask the response from the try-block.
-        if locked:
-            try:
-                _unlock_deploy(lock_fd)
-            except Exception:
-                pass
-        os.close(lock_fd)
-
-
 @app.route("/api/tick", methods=["POST"])
 def tick():
     """Daily-quiz broadcast trigger, called on a schedule by
@@ -368,14 +153,12 @@ def tick():
     Verifies an X-Tick-Secret header against TICK_SECRET (constant-time).
     Fail-closed: returns 403 when TICK_SECRET is unset, so a misconfigured
     deploy can't let anyone spam subscribers. This is a DIFFERENT secret from
-    the Telegram webhook secret (X-Telegram-Bot-Api-Secret-Token) and, by
-    design, from DEPLOY_SECRET — the tick endpoint only broadcasts a quiz, so
-    it must not carry the deploy endpoint's code-execution authority.
+    the Telegram webhook secret (X-Telegram-Bot-Api-Secret-Token) — the tick
+    endpoint only broadcasts a quiz, nothing more.
 
-    No fcntl flock (unlike /api/deploy): run_daily_quiz() takes an atomic
-    once-per-day store claim, so overlapping or retried calls are idempotent.
-    run_daily_quiz never raises, so the endpoint returns 200 with a summary
-    body even for "no subscribers" / "already sent" / "generation failed".
+    run_daily_quiz() takes an atomic once-per-day store claim, so overlapping or
+    retried calls are idempotent. It never raises, so the endpoint returns 200
+    with a summary body even for "no subscribers" / "already sent" / "failed".
     """
     from bot.config import TICK_SECRET
 

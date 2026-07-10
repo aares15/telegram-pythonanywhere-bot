@@ -6,9 +6,9 @@ This file describes the architecture, conventions, and deployment process for th
 
 ## What this project is
 
-A Telegram bot template built for students. It runs on PythonAnywhere's free tier, uses Cerebras (or any OpenAI-compatible API) for AI responses, and a local SQLite file on PA's persistent disk for per-user conversation memory.
+A Telegram bot template built for students. It runs on Vercel (serverless functions), uses Cerebras (or any OpenAI-compatible API) for AI responses, and Upstash Redis (over the REST API) for per-user conversation memory. It can also run locally via polling with zero hosting, and falls back to a local SQLite file when run on a host with a persistent disk.
 
-**Stack:** Python 3.13 · Flask · pyTelegramBotAPI · OpenAI SDK · SQLite · PythonAnywhere
+**Stack:** Python 3.13 · Flask · pyTelegramBotAPI · OpenAI SDK · Upstash Redis · Vercel
 
 ---
 
@@ -17,21 +17,22 @@ A Telegram bot template built for students. It runs on PythonAnywhere's free tie
 ```
 telegram-pythonanywhere-bot/
 ├── api/
-│   └── index.py          # Flask entrypoint — webhook route, /api/health, secret verification
+│   └── index.py          # Flask entrypoint (Vercel function) — /api/webhook, /api/health, /api/tick, cold-start bootstrap
 ├── bot/
 │   ├── __init__.py
 │   ├── config.py         # All env vars and constants (edit this to configure the bot)
-│   ├── clients.py        # Instantiates bot, ai, store (do not edit unless adding a client)
-│   ├── store.py          # KV-with-TTL: SqliteStore (persistent disk) + RedisStore (Upstash REST, for serverless/Vercel)
+│   ├── commands.py       # Single source of truth for the command list — drives BOTH /help text and the Telegram "/" menu (set_my_commands)
+│   ├── clients.py        # Instantiates bot, ai, store; register_webhook() + register_commands() (do not edit unless adding a client)
+│   ├── store.py          # KV-with-TTL: RedisStore (Upstash REST, for serverless/Vercel) + SqliteStore (local dev / persistent disk)
 │   ├── ai.py             # ask_ai() — history + dispatch to providers
 │   ├── providers.py      # Provider dispatch: OpenAI-compatible (with retry) or HF Gradio space
-│   ├── news.py           # get_top_news() (Armenia search) + get_world_news() (world top-headlines) — /newsArmenia and /newsWorldwide
 │   ├── lookup.py         # /lookup — Wikipedia grounding for world topics; Armenian topics answered from expertise + trusted Armenian source links (never Wikipedia)
 │   ├── preferences.py    # Per-user provider preference stored via store
 │   ├── history.py        # get/save/clear conversation history via store (graceful degradation)
 │   ├── rate_limit.py     # Per-user daily message rate limiting via store (graceful degradation)
 │   ├── dedupe.py         # Drops repeated update_ids when Telegram retries (graceful degradation)
 │   ├── helpers.py        # send_reply(), keep_typing() context manager, should_respond() utilities
+│   ├── quiz.py           # Daily Quiz Arena — generation, scoring, leaderboards, daily broadcast
 │   └── handlers.py       # All Telegram command and message handlers — add new commands here
 ├── tests/
 │   ├── conftest.py       # Mocks env vars and external packages (telebot, openai, flask)
@@ -46,17 +47,17 @@ telegram-pythonanywhere-bot/
 │   ├── test_store.py     # Direct SqliteStore tests (get/set/delete/incr/expire + TTL)
 │   ├── test_redis_store.py # RedisStore (Upstash REST) command mapping + PING-on-init
 │   ├── test_clients.py   # Store backend selection (_init_redis / _init_store precedence)
-│   ├── test_news.py      # get_top_news() parsing + /news handler
+│   ├── test_register_webhook.py  # register_webhook() success / no-op / retry / failure
+│   ├── test_register_commands.py # command_specs() source of truth + register_commands() (set_my_commands) retry/failure
 │   ├── test_lookup.py    # is_armenian_topic() routing, wiki_lookup() parsing, /lookup handler, ask_ai context grounding
-│   ├── test_deploy.py    # /api/deploy auto-deploy webhook (secret verification + git pull)
-│   └── test_webhook.py
+│   └── test_webhook.py   # /api/webhook secret check, dedupe, malformed input, _bootstrap_once()
 ├── .github/
 │   └── workflows/
-│       ├── ci.yml        # Runs pytest on every push and pull request
-│       └── deploy.yml    # Triggers PA auto-deploy via /api/deploy on push to main
+│       ├── ci.yml          # Runs pytest on every push and pull request
+│       └── daily-quiz.yml  # Cron → POST /api/tick to broadcast the daily quiz
+├── vercel.json           # Vercel config — routes api/index.py, sets maxDuration=60
 ├── .env.example          # Template for required environment variables
 ├── run_local.py          # Run the bot locally via polling — for learning + dev
-├── pythonanywhere_wsgi.py # WSGI entry exposing Flask `app` as `application` for PA
 ├── Makefile              # install / run / test shortcuts
 ├── requirements.txt
 ├── CLAUDE.md             # Agent-readable project guide (this file)
@@ -67,16 +68,20 @@ telegram-pythonanywhere-bot/
 
 ## How the bot works
 
-1. Telegram sends a POST to `https://<your-pa-username>.pythonanywhere.com/api/webhook` on every message
-2. PA's WSGI loader imports `pythonanywhere_wsgi.py` at the project root, which loads `.env` then re-exports the Flask `app` as `application`
-3. `api/index.py` validates the `X-Telegram-Bot-Api-Secret-Token` header (if `WEBHOOK_SECRET` is set), then deserializes the update and passes it to pyTelegramBotAPI
-4. pyTelegramBotAPI routes to the correct handler in `bot/handlers.py`
-5. For text messages: checks `should_respond()` → checks rate limit → enters `keep_typing()` context manager (a background thread re-sends the Telegram "typing" action every 4s so the indicator stays alive during slow generations) → calls `ask_ai()` → exits context (stops thread) → sends reply
-6. `ask_ai()` loads history via the store, prepends the system prompt, dispatches to `generate()` in `bot/providers.py` which calls `_call_main()` (with retry logic) or `_call_hf()` depending on the user's provider preference, then saves updated history
+1. Telegram sends a POST to `https://<your-project>.vercel.app/api/webhook` on every message
+2. Vercel routes the request to the Flask app in `api/index.py` (run as a serverless function — a fresh cold start when no warm instance is available)
+3. `api/index.py::webhook()` validates the `X-Telegram-Bot-Api-Secret-Token` header (if `WEBHOOK_SECRET` is set) and returns 403 on mismatch — **before** any heavy imports, so a forged/mis-secreted POST never triggers `bot.get_me()` or client init
+4. Only after auth does it lazily import `telebot`, `bot.handlers` (registers the `@bot.message_handler` decorators), and `bot.clients.bot`
+5. `_bootstrap_once()` runs (see "Cold-start bootstrap" below) to re-assert the webhook + sync the "/" command menu, once per warm instance
+6. The update is de-duplicated by `update_id` (`bot.dedupe.try_acquire`), then handed to `bot.process_new_updates([update])`; pyTelegramBotAPI routes it to the correct handler in `bot/handlers.py`. If processing raises, the dedupe claim is released and the exception propagates (non-200) so Telegram retries
+7. For text messages: the handler checks `should_respond()` → checks rate limit → enters `keep_typing()` (a background thread re-sends the Telegram "typing" action every 4s so the indicator stays alive during slow generations) → calls `ask_ai()` → exits context (stops thread) → sends reply
+8. `ask_ai()` loads history via the store, prepends the system prompt, dispatches to `generate()` in `bot/providers.py` which calls `_call_main()` (with retry logic) or `_call_hf()` depending on the user's provider preference, then saves updated history
 
-**Critical:** `telebot.TeleBot` must be created with `threaded=False`. Without this, handlers run in threads that can be killed unexpectedly. `threaded=False` is also fine for local polling (`run_local.py`) — updates just process sequentially in the main thread.
+**Critical:** `telebot.TeleBot` must be created with `threaded=False`. Without this, handlers run in threads that can be killed unexpectedly (and on serverless, a thread can be frozen the moment the response returns). `threaded=False` is also fine for local polling (`run_local.py`) — updates just process sequentially in the main thread.
 
-**Local development mode:** `run_local.py` at the repo root runs the same `bot/` modules via `bot.infinity_polling()` instead of the webhook. It auto-loads `.env` with a zero-dependency inline loader, calls `bot.remove_webhook()` to release any registered production webhook, then blocks on polling. Use this for teaching, prototyping, or iterating without redeploying. Any production webhook registered against the same bot token must be re-registered via `setWebhook` after you stop polling, otherwise production will stay silent.
+**Cold-start bootstrap.** Vercel has no long-lived "boot" step, so `api/index.py::_bootstrap_once()` is the serverless analog: on the first authenticated `/api/webhook` after a cold start it calls `bot.clients.register_webhook()` (re-asserts `WEBHOOK_URL`) and `bot.clients.register_commands()` (syncs the "/" menu via `set_my_commands`). It runs **at most once per warm instance** — guarded by a module-level `_BOOTSTRAPPED` flag that is set *before* the attempt so a persistent failure doesn't add latency to every request; a fresh instance (Vercel spins these up frequently) retries, so it self-heals. It is best-effort and never raises — a registration failure must not drop the user's message. The **very first** webhook still has to be set once by hand (`curl setWebhook`, see "Vercel deployment"), because no request reaches the function until a webhook exists.
+
+**Local development mode:** `run_local.py` at the repo root runs the same `bot/` modules via `bot.infinity_polling()` instead of the webhook. It auto-loads `.env` with a zero-dependency inline loader, calls `bot.remove_webhook()` to release any registered production webhook, syncs the "/" command menu via `register_commands()`, then blocks on polling. Use this for teaching, prototyping, or iterating without redeploying. Any production webhook registered against the same bot token must be re-registered via `setWebhook` after you stop polling, otherwise production will stay silent.
 
 ---
 
@@ -86,29 +91,22 @@ telegram-pythonanywhere-bot/
 |---|---|---|---|
 | `TELEGRAM_BOT_TOKEN` | Yes | — | From @BotFather on Telegram |
 | `AI_API_KEY` | Yes | — | API key for the AI provider |
-| `SQLITE_PATH` | No | — | Absolute path to a SQLite DB file (persistent-disk hosts like PA — `/home/<your-pa-username>/bot.db`). Enables history / rate limit / preferences / dedupe / quiz. **Does not work on Vercel** (read-only FS) — use Redis there. Ignored when `REDIS_REST_*` is set |
-| `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` | No | — | Upstash Redis REST credentials. When both set, the bot uses `RedisStore` — the storage backend for serverless hosts (Vercel) where SQLite can't persist. Takes precedence over `SQLITE_PATH`. The names `KV_REST_API_URL` / `KV_REST_API_TOKEN` are also accepted (older Vercel KV integration). On Vercel, create an Upstash Redis from the Storage/Marketplace tab and it injects these automatically |
+| `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` | On Vercel | — | Upstash Redis REST credentials. When both set, the bot uses `RedisStore` — the storage backend for serverless hosts (Vercel) where SQLite can't persist. Takes precedence over `SQLITE_PATH`. The names `KV_REST_API_URL` / `KV_REST_API_TOKEN` are also accepted (older Vercel KV integration). On Vercel, add an Upstash Redis from the Storage/Marketplace tab and it injects these automatically |
+| `SQLITE_PATH` | No | — | Absolute path to a SQLite DB file, for **local dev** or a host with a writable persistent disk. Enables history / rate limit / preferences / dedupe / quiz. **Does not work on Vercel** (read-only FS). Ignored when `REDIS_REST_*` is set |
 | `AI_BASE_URL` | No | `https://api.cerebras.ai/v1` | Any OpenAI-compatible base URL |
 | `AI_MODEL` | No | `gpt-oss-120b` | Model name for the provider |
 | `HF_SPACE_ID` | No | — | Hugging Face Gradio space ID (e.g. `edisimon/armgpt-demo`) — enables `/model` command when set |
 | `HF_TOKEN` | No | — | HF auth token — only needed if the Gradio space is private or gated |
-| `WEBHOOK_SECRET` | No | _auto-generated_ | Random string Telegram echoes back in `X-Telegram-Bot-Api-Secret-Token`. Auto-bootstrapped on first run: if the env var is unset, `bot/config.py::_bootstrap_webhook_secret()` generates a 64-hex secret, persists it to `.webhook_secret` (gitignored, mode 0600), and reuses it on subsequent boots. The boot-time `register_webhook()` then ships it to Telegram. Set the env var to override / share across envs |
-| `WEBHOOK_URL` | No | — | When set, the bot auto-registers this URL as the Telegram webhook on every worker boot and after every `/api/deploy`. No manual `setWebhook` step needed. Idempotent. On PA, value is `https://<your-pa-username>.pythonanywhere.com/api/webhook`. Leave unset for local polling |
+| `WEBHOOK_SECRET` | No | _auto-generated locally_ | Random string Telegram echoes back in `X-Telegram-Bot-Api-Secret-Token`. Locally / on a persistent disk it's auto-bootstrapped: if the env var is unset, `bot/config.py::_bootstrap_webhook_secret()` generates a 64-hex secret, persists it to `.webhook_secret` (gitignored, mode 0600), and reuses it. **On Vercel set this explicitly as an env var** — the filesystem is read-only, so each instance would otherwise generate nothing (unsigned) and can't share a persisted value. `register_webhook()` ships it to Telegram via `secret_token` |
+| `WEBHOOK_URL` | No | — | When set, the bot re-asserts this URL as the Telegram webhook on the first request after each cold start (`_bootstrap_once`). Idempotent. On Vercel, value is `https://<your-project>.vercel.app/api/webhook`. Leave unset for local polling |
 | `RATE_LIMIT` | No | `250` | Max messages per user per day |
 | `ALLOWED_USERS` | No | _open_ | Comma-separated whitelist of usernames (with/without `@`) or numeric user IDs. Empty = everyone allowed. Non-empty = silent drop for non-whitelisted (no rejection reply, no leak of bot existence). Implemented as `func=is_allowed` on every `@bot.message_handler` so telebot never dispatches the handler |
-| `HOSTING_LABEL` | No | `PythonAnywhere` | Label shown by the `/about` command |
-| `NEWS_API_KEY` | No | — | Enables the `/newsArmenia` and `/newsWorldwide` commands (top 3 headlines each). Free key from https://gnews.io. When unset, both reply that news isn't set up. **PA caveat:** `gnews.io` is NOT on the free-tier outbound whitelist — works locally, but needs the domain whitelisted (or a whitelisted provider) to run on PA |
-| `NEWS_API_URL` | No | `https://gnews.io/api/v4/search` | **Armenia** news endpoint (`/search`). Swap to use a different provider (must return `{"articles": [{title, source:{name}, url}]}`) |
-| `NEWS_QUERY` | No | `Armenia in:title,description` | Search query used for `/newsArmenia`. Uses GNews's `in:title,description` attribute so "Armenia" must appear in the headline/summary — keeps results Armenia-focused, not any article mentioning it in passing. Change for a different topic/region |
-| `NEWS_WORLD_API_URL` | No | `https://gnews.io/api/v4/top-headlines` | **Worldwide** news endpoint (`/top-headlines`) used by `/newsWorldwide`. Returns ranked current headlines by category (no search term). Same JSON shape as `NEWS_API_URL` |
-| `NEWS_WORLD_CATEGORY` | No | `general` | Category for `/newsWorldwide`: `general` (top overall) or one of `world` / `nation` / `business` / `technology` / `entertainment` / `sports` / `science` / `health` |
-| `NEWS_LANG` | No | `en` | Article language passed to the news API (both commands) |
-| `WIKI_API_URL` | No | `https://en.wikipedia.org/w/api.php` | Wikipedia API endpoint for `/lookup` (world-history grounding). `*.wikipedia.org` IS on PA's free-tier outbound whitelist, so unlike `/news` this works on PA out of the box. Point at another language edition (e.g. `hy.wikipedia.org`) to change the source wiki |
+| `HOSTING_LABEL` | No | `Vercel` | Label shown by the `/about` command |
+| `TICK_SECRET` | No | — | Enables `/api/tick` (daily-quiz broadcast). Fail-closed: when unset the endpoint returns 403. Set the same value as the `TICK_SECRET` GitHub repo secret used by `.github/workflows/daily-quiz.yml` |
+| `WIKI_API_URL` | No | `https://en.wikipedia.org/w/api.php` | Wikipedia API endpoint for `/lookup` (world-history grounding). Point at another language edition (e.g. `hy.wikipedia.org`) to change the source wiki |
 | `WIKI_USER_AGENT` | No | `HistoryTeacherBot/1.0 (Telegram teaching bot)` | User-Agent sent to the Wikipedia API — Wikipedia asks clients to identify themselves |
-| `DEPLOY_SECRET` | No | — | Enables `/api/deploy` auto-deploy webhook. Fail-closed: when unset, the endpoint returns 403. Generate with `openssl rand -hex 32` and set the same value as a GitHub repo secret named `DEPLOY_SECRET` so the workflow at `.github/workflows/deploy.yml` can call the endpoint |
-| `PA_WSGI_PATH` | No | _auto-detected_ | Absolute path of the PA WSGI file `/api/deploy` touches to reload the worker. Only needed when auto-detection fails (non-default PA layout / custom domain) — the deploy response says so explicitly when that happens |
 
-All env vars are read in `bot/config.py`. `.strip()` is called on every value to defend against trailing newlines / whitespace from copy-paste.
+All env vars are read in `bot/config.py`. `.strip()` is called on every value to defend against trailing newlines / whitespace from copy-paste. On Vercel, set these in the project's **Settings → Environment Variables**; `VERCEL_GIT_COMMIT_SHA` is injected automatically and powers `/api/health` + the `/about` version line.
 
 ---
 
@@ -151,12 +149,12 @@ Preferences are stored via `store` under `provider:{user_id}` (no TTL). If the s
 - Base completion model, not a chat model — `bot/providers.py::_last_user_message` extracts only the most recent user message and passes it as a bare prompt. Chat transcripts (`"User: ...\nAssistant: ..."`) would just confuse it since it was trained on raw Armenian text with no turn structure
 - No system prompt support — the system prompt is dropped entirely for HF
 - No conversation memory — only the latest user turn is sent
-- Hardcoded knobs (`bot/providers.py`) — `HF_LENGTH=100`, `HF_TEMPERATURE=0.6`, `HF_TOP_K=30`. Tuned so generation finishes inside Telegram's ~60s webhook window
+- Hardcoded knobs (`bot/providers.py`) — `HF_LENGTH=100`, `HF_TEMPERATURE=0.6`, `HF_TOP_K=30`. Tuned so generation finishes inside Telegram's ~60s webhook window (and Vercel's 60s `maxDuration`)
 - Output is a `(html_output, status_text)` tuple — `_call_hf` takes index 0, strips HTML tags, and strips the echoed prompt prefix if present
 
 To switch to a different HF space, change `HF_SPACE_ID` and confirm the target space exposes a `/generate` API with the same signature, or adapt `_call_hf` in `bot/providers.py`.
 
-**PA outbound-whitelist caveat for HF Spaces.** `gradio_client` first fetches the space config from `huggingface.co` (whitelisted) and then routes `predict()` calls to `<space-subdomain>.hf.space` (NOT explicitly whitelisted as of last check). If `/model hf` hangs or 403s on PA but works locally, that's almost certainly the cause — verify with `curl -I https://<space>.hf.space/` from a PA Bash console, and if blocked, request `*.hf.space` on the PA forum whitelist thread. `bot/providers.py::_call_hf` passes `httpx_kwargs={"timeout": HF_REQUEST_TIMEOUT}` so a blocked subdomain fails fast instead of wedging the worker.
+**HF Spaces routing.** `gradio_client` first fetches the space config from `huggingface.co`, then routes `predict()` calls to `<space-subdomain>.hf.space`. `bot/providers.py::_call_hf` passes `httpx_kwargs={"timeout": HF_REQUEST_TIMEOUT}` so a slow or unreachable space fails fast instead of wedging the function until Telegram's webhook timeout / Vercel's `maxDuration`.
 
 ---
 
@@ -164,71 +162,75 @@ To switch to a different HF space, change `HF_SPACE_ID` and confirm the target s
 
 `/lookup <topic>` (alias `/wiki`) answers a history question grounded in a real, citable source instead of the model's memory alone. `bot/lookup.py` routes by topic:
 
-- **World-history topics** → `wiki_lookup()` makes one Wikipedia API call (`generator=search` + `prop=extracts|info`) to fetch the top hit's plain-text intro (capped at `WIKI_MAX_EXTRACT` chars) and canonical URL. The extract is passed to `ask_ai(..., context=...)` as a grounding system message, and the reply cites the article. Wikipedia is whitelisted on PA, so this works on PA and Vercel alike.
-- **Armenian-history topics** → deliberately **never** sourced from Wikipedia (a product decision). `is_armenian_topic()` does a transparent case-insensitive substring match against `ARMENIAN_TOPIC_KEYWORDS` (extend that list in `bot/config.py` to widen coverage). Matches are answered from the teacher's own expertise, with a "further reading" block linking `ARMENIAN_SOURCES` (Armeniapedia, 100years100facts.com, Armenian-History.com). Those sites are **not** whitelisted on PA and some block bots (Armeniapedia sits behind a MyWikis anti-bot challenge), so the bot links to them rather than fetching them. The filter errs toward catching Armenian topics — a false positive only costs a Wikipedia citation, whereas a miss would route an Armenian topic to Wikipedia, which is what we're avoiding. A **safety net** re-checks the returned Wikipedia article's title with `is_armenian_topic()` and falls back to the Armenian path if a topic slipped past the keyword filter.
+- **World-history topics** → `wiki_lookup()` makes one Wikipedia API call (`generator=search` + `prop=extracts|info`) to fetch the top hit's plain-text intro (capped at `WIKI_MAX_EXTRACT` chars) and canonical URL. The extract is passed to `ask_ai(..., context=...)` as a grounding system message, and the reply cites the article.
+- **Armenian-history topics** → deliberately **never** sourced from Wikipedia (a product decision). `is_armenian_topic()` does a transparent case-insensitive substring match against `ARMENIAN_TOPIC_KEYWORDS` (extend that list in `bot/config.py` to widen coverage). Matches are answered from the teacher's own expertise, with a "further reading" block linking `ARMENIAN_SOURCES` (Armeniapedia, 100years100facts.com, Armenian-History.com). Some of those sites block bots (Armeniapedia sits behind a MyWikis anti-bot challenge), so the bot links to them rather than fetching them. The filter errs toward catching Armenian topics — a false positive only costs a Wikipedia citation, whereas a miss would route an Armenian topic to Wikipedia, which is what we're avoiding. A **safety net** re-checks the returned Wikipedia article's title with `is_armenian_topic()` and falls back to the Armenian path if a topic slipped past the keyword filter.
 
-`ask_ai()` gained an optional `context` parameter: grounding text sent to the model for one call only, **not** persisted to conversation history (the extract is large and re-fetchable; persisting it would bloat the rolling `MAX_HISTORY` window). The user turn and assistant reply are still saved, so follow-ups work. The HF provider ignores `context` (it only sees the last user message) — consistent with its other limitations.
+`ask_ai()` has an optional `context` parameter: grounding text sent to the model for one call only, **not** persisted to conversation history (the extract is large and re-fetchable; persisting it would bloat the rolling `MAX_HISTORY` window). The user turn and assistant reply are still saved, so follow-ups work. The HF provider ignores `context` (it only sees the last user message) — consistent with its other limitations.
 
 ## Webhook verification
 
 To block spoofed requests, set a random secret and pass it when registering the webhook:
 
 ```bash
-# Add WEBHOOK_SECRET to PA .env, reload the web app, then:
+# Set WEBHOOK_SECRET in the Vercel dashboard (redeploy), then:
 curl -X POST "https://api.telegram.org/bot<TOKEN>/setWebhook" \
-  --data-urlencode "url=https://<your-pa-username>.pythonanywhere.com/api/webhook" \
+  --data-urlencode "url=https://<your-project>.vercel.app/api/webhook" \
   --data-urlencode "secret_token=<your secret>"
 ```
 
-When `WEBHOOK_SECRET` is set, `api/index.py` checks the `X-Telegram-Bot-Api-Secret-Token` header on every request and returns 403 if it does not match. If the variable is not set, verification is skipped (backwards compatible).
+When `WEBHOOK_SECRET` is set, `api/index.py` checks the `X-Telegram-Bot-Api-Secret-Token` header on every request and returns 403 if it does not match. If the variable is not set, verification is skipped (backwards compatible) and the endpoint logs a one-time warning.
 
 ---
 
 ## Storage
 
-The bot's storage layer is a thin KV-with-TTL abstraction in `bot/store.py` exposing six operations: `get / set / set_nx / delete / incr / expire`. Two interchangeable backends implement it; `bot/clients.py::store` selects one at boot with the precedence **Redis → SQLite → stateless**:
+The bot's storage layer is a thin KV-with-TTL abstraction in `bot/store.py` exposing six operations: `get / set / set_nx / delete / incr / expire`. Two interchangeable backends implement it; `bot/clients.py::store` selects one at import with the precedence **Redis → SQLite → stateless**:
 
-- **`RedisStore` (Upstash REST) — the serverless / Vercel backend.** Selected when `REDIS_REST_URL` + `REDIS_REST_TOKEN` are set (read from `UPSTASH_REDIS_REST_*` or `KV_REST_API_*` — whichever the Vercel/Upstash integration injects). Each op is one Redis command over Upstash's HTTP REST API (`POST` a `["SET","k","v","EX","60"]` array, Bearer auth), so it works where a persistent TCP connection can't and where SQLite can't persist (Vercel's read-only, ephemeral disk). Command semantics were chosen to match `SqliteStore` exactly (`INCR` creates-at-1 and keeps TTL; `SET … NX` = claim-if-absent). `__init__` sends a `PING` so a bad URL/token fails fast at boot and falls back to the next backend.
-- **`SqliteStore` — the persistent-disk / PythonAnywhere backend.** Selected when `REDIS_REST_*` is absent but `SQLITE_PATH` is set. Opens the DB in WAL mode with `check_same_thread=False`. The schema is a single `kv(key, value, expires_at)` table; expired rows are filtered on read and overwritten on write — no background sweeper, never affects correctness. **Does not work on Vercel** (read-only FS → init fails → falls through to stateless).
+- **`RedisStore` (Upstash REST) — the serverless / Vercel backend.** Selected when `REDIS_REST_URL` + `REDIS_REST_TOKEN` are set (read from `UPSTASH_REDIS_REST_*` or `KV_REST_API_*` — whichever the Vercel/Upstash integration injects). Each op is one Redis command over Upstash's HTTP REST API (`POST` a `["SET","k","v","EX","60"]` array, Bearer auth), so it works where a persistent TCP connection can't and where SQLite can't persist (Vercel's read-only, ephemeral disk). Command semantics were chosen to match `SqliteStore` exactly (`INCR` creates-at-1 and keeps TTL; `SET … NX` = claim-if-absent). `__init__` sends a `PING` so a bad URL/token fails fast and falls back to the next backend.
+- **`SqliteStore` — the local-dev / persistent-disk backend.** Selected when `REDIS_REST_*` is absent but `SQLITE_PATH` is set. Opens the DB in WAL mode with `check_same_thread=False`. The schema is a single `kv(key, value, expires_at)` table; expired rows are filtered on read and overwritten on write — no background sweeper, never affects correctness. **Does not work on Vercel** (read-only FS → init fails → falls through to stateless).
 - **Stateless mode (neither configured):** `store = None`. Each consumer (`history`, `rate_limit`, `preferences`, `dedupe`, `quiz`) checks for `None` at the top of every function and returns safe defaults: history is empty, rate limiting is skipped, `get_provider` returns `DEFAULT_PROVIDER`, `set_provider` returns `False`, dedupe is a no-op, quiz scoring is skipped. This is the intended Day-1 teaching mode — kids can run the bot locally with only a Telegram token and an AI API key.
 - **Graceful degradation under runtime failure:** every store call in the consumer modules is wrapped in try-except. On failure: same fallbacks as stateless mode, plus an error log line.
-- **Performance vs. networked KV:** SQLite ops are in-process and take microseconds, vs. ~20–80ms per round-trip to a remote KV over HTTPS. The webhook reply latency for an average message is dominated by the AI call, not storage.
+- **Performance:** SQLite ops are in-process (microseconds); a remote KV over HTTPS is ~20–80ms per round-trip. On Vercel, storage round-trips add to per-request latency, but the AI call still dominates.
 
 ---
 
 ## Reliability
 
 - **AI retry logic:** `_call_main()` in `bot/providers.py` retries up to 3 attempts (`AI_RETRIES=2` extra retries) with exponential backoff (1s, 2s) before raising. Handles transient network errors and rate-limit spikes. HF is not retried (it's too slow — a retry would blow the per-request budget).
-- **Typing indicator during slow calls:** `keep_typing()` in `bot/helpers.py` spawns a daemon thread that re-sends `send_chat_action(chat_id, "typing")` every 4 seconds (Telegram's typing action expires after ~5s). On context exit the thread is signalled and joined with a 2s timeout so the request shuts down cleanly. Proxy 503s from PA's outbound proxy are caught and logged; the thread keeps looping.
+- **Typing indicator during slow calls:** `keep_typing()` in `bot/helpers.py` spawns a daemon thread that re-sends `send_chat_action(chat_id, "typing")` every 4 seconds (Telegram's typing action expires after ~5s). On context exit the thread is signalled and joined with a 2s timeout so the request shuts down cleanly before the function returns. Transient `send_chat_action` errors are caught and logged; the thread keeps looping.
 
 ---
 
-## PythonAnywhere deployment
+## Vercel deployment
 
-The deployment target is `https://<your-pa-username>.pythonanywhere.com`. The same Flask app at `api/index.py` runs via a long-lived WSGI worker — no serverless cold-start considerations, no function timeout caps.
+The deployment target is `https://<your-project>.vercel.app`. `api/index.py` is a Flask app run as a Vercel serverless function; `vercel.json` routes to it and sets `maxDuration=60` (matching Telegram's ~60s webhook budget). There is **no long-lived worker** — each request may hit a fresh cold start.
 
-**PA wiring** (manual one-time setup, no CLI equivalent):
-- PA's WSGI file at `/var/www/<your-pa-username>_pythonanywhere_com_wsgi.py` adds the project to `sys.path` and does `from pythonanywhere_wsgi import application`
-- `.env` is uploaded to the PA project directory (read by `pythonanywhere_wsgi.py` at worker startup using the same minimal loader as `run_local.py`)
-- Webhook registration is a one-off `curl setWebhook` against `https://<your-pa-username>.pythonanywhere.com/api/webhook`
+**One-time setup:**
+1. Import the GitHub repo at [vercel.com](https://vercel.com). Vercel auto-detects the Python function and `vercel.json`.
+2. In **Settings → Environment Variables**, set at least `TELEGRAM_BOT_TOKEN`, `AI_API_KEY`, `WEBHOOK_SECRET`, and `WEBHOOK_URL=https://<your-project>.vercel.app/api/webhook`. For persistent memory add an **Upstash Redis** from the Storage/Marketplace tab (it injects `UPSTASH_REDIS_REST_URL` / `_TOKEN` — or the `KV_REST_API_*` names — automatically). Optionally set `TICK_SECRET` for the daily quiz.
+3. Deploy (any push to `main` deploys automatically thereafter).
+4. **Register the webhook once** (no request reaches the function before this exists):
+   ```bash
+   curl -X POST "https://api.telegram.org/bot<TOKEN>/setWebhook" \
+     --data-urlencode "url=https://<your-project>.vercel.app/api/webhook" \
+     --data-urlencode "secret_token=<WEBHOOK_SECRET>"
+   ```
 
-**Re-deploying after a `git pull`:** PA workers don't auto-reload. Either click "Reload" on the Web tab, or `touch /var/www/<your-pa-username>_pythonanywhere_com_wsgi.py` in a Bash console (changing the WSGI file's mtime triggers a worker reload).
+**Auto-deploy on push.** Vercel's Git integration builds and deploys on every push to `main` (and creates preview deployments for other branches / PRs). There is no bot-side deploy endpoint or GitHub deploy workflow — Vercel owns deployment. Keep the bot token configured only on the **production** deployment so a preview build never clobbers the production webhook.
 
-**First-time deploy automation.** `scripts/pa_deploy.sh` (run via `make deploy-pa`) drives the full first-time setup from the local terminal: creates the web app via `POST /api/v0/user/<u>/webapps/`, finds or creates a bash console (the only step requiring a one-time browser visit — PA initializes new consoles only after they're loaded in the browser), then `send_input`s `git clone`, `python3.13 -m venv`, and `pip install -r requirements.txt`. It then uploads `.env` to `<PROJECT_DIR>/.env` and the WSGI shim to `/var/www/<u>_pythonanywhere_com_wsgi.py` via the Files API, `PATCH`es `source_directory` + `virtualenv_path` on the web app, and reloads. Required `.env` vars: `PA_USERNAME`, `PA_API_TOKEN` (in addition to the regular bot vars). Idempotent — re-running heals partial state. For ongoing updates the GitHub Actions workflow (`.github/workflows/deploy.yml` → `/api/deploy`) is still preferred; the script is for first-time setup + recovery.
+**Cold-start bootstrap.** On the first authenticated `/api/webhook` after each cold start, `_bootstrap_once()` re-asserts the webhook (`register_webhook()`, when `WEBHOOK_URL` is set) and syncs the "/" command menu (`register_commands()` → `set_my_commands`). Once per warm instance, best-effort, never raises. This means the "/" menu and webhook self-heal across deploys without any manual step (after the one-time `setWebhook` above).
 
-**Console output polling.** `pa_deploy.sh::run_remote` wraps every command it sends as `{ cmd; } && echo <marker>_'OK' || echo <marker>_'FAIL'`, then polls `GET /consoles/<id>/get_latest_output/` every 3s until either marker appears (or it times out). The quoted `'OK'`/`'FAIL'` suffixes keep the echoed *input* line from matching the grep — only the executed echo produces the contiguous marker — so success isn't declared early or on a failed command. Cloning uses an HTTPS URL derived from the origin remote (PA consoles have no SSH key for GitHub).
+**Verifying a deploy is live.** `/api/health` returns `OK <short-sha>`, where the SHA is `VERCEL_GIT_COMMIT_SHA` captured at cold start (git fallback locally). Hit `https://<your-project>.vercel.app/api/health` and confirm it reports the commit you just pushed. `/about` shows the same SHA on its `Version` line.
 
-**Auto-deploy on push to main.** When `DEPLOY_SECRET` is set in PA's `.env`, the `/api/deploy` endpoint accepts authenticated POSTs that converge the checkout to origin and reload the worker: `git fetch origin` + `git reset --hard origin/<branch>` (NOT `git pull --ff-only` — a pull wedges permanently once the server worktree diverges via a hand-edited file or a force-push, and every later deploy 500s while the bot keeps running old code; reproduced live 2026-07-02). Untracked files (`.env`, `.webhook_secret`, `.deploy.lock`, `bot.db`) survive the reset; there is deliberately no `git clean`. Consequence: edits to TRACKED files made directly on PA are discarded by the next deploy — the PA checkout is a deploy target, not a workspace. If the deploy changed `requirements.txt`, the endpoint runs `<venv>/bin/pip install -r requirements.txt` (venv found via `sys.prefix`) before reloading, and refuses to reload (500, old worker keeps serving) if pip fails. The WSGI-touch outcome is always reported in the response body — a missing WSGI file yields a loud "worker was NOT restarted" warning instead of the old silent skip; `_pa_wsgi_path()` resolves via `PA_WSGI_PATH` env → `$USER`/`$LOGNAME` → `pwd.getpwuid` → `/home/<user>/` prefix of the checkout → unambiguous `/var/www/*_pythonanywhere_com_wsgi.py` glob. `.github/workflows/deploy.yml` triggers on push to `main` using two repo secrets (`DEPLOY_SECRET`, `PA_DEPLOY_URL`), retries the curl through PA proxy blips (idempotent server side makes retries safe), then polls `/api/health` until the pushed commit's SHA is actually being served — a green run means the new code is LIVE, not merely that the server said OK. The endpoint fails-closed (403) when `DEPLOY_SECRET` is unset and uses `hmac.compare_digest` for secret comparison. The workflow skips with a warning when its secrets aren't set, so this is fully optional. `/api/health` returns `OK <short-sha>`, with the SHA captured at worker boot — it identifies the code the worker is *running*, which is what makes the verification step truthful.
+**Daily quiz.** `.github/workflows/daily-quiz.yml` runs on a cron and `POST`s `/api/tick` with an `X-Tick-Secret` header. Set two GitHub repo secrets: `TICK_URL` (`https://<your-project>.vercel.app/api/tick`) and `TICK_SECRET` (matching the `TICK_SECRET` env var in Vercel). `/api/tick` is fail-closed (403 when `TICK_SECRET` is unset) and idempotent per day (an atomic once-per-day store claim), so retries are safe. Vercel Cron is a viable alternative, but GitHub Actions is used so the schedule works regardless of Vercel plan.
 
-**Auto webhook registration.** When `WEBHOOK_URL` is set, `pythonanywhere_wsgi.py` calls `bot.clients.register_webhook()` at worker boot, and `/api/deploy` calls it again after every deploy. Both call `bot.set_webhook(url=WEBHOOK_URL, secret_token=WEBHOOK_SECRET)` with up to 3 attempts (1s/2s backoff) because PA's outbound proxy 503-blips transiently (a boot-time registration was seen failing on such a blip on 2026-06-29). Failures are caught and logged — never crash the worker. This eliminates the manual `curl setWebhook` step from the deploy guide.
+**Auto webhook-secret bootstrap (local / persistent disk only).** If `WEBHOOK_SECRET` is unset, `bot/config.py::_bootstrap_webhook_secret()` generates a 64-hex-char secret and persists it in `.webhook_secret` at the project root (gitignored, chmod 0600), reused on later runs. This is convenient locally, but **on Vercel the filesystem is read-only**, so the write fails and the bot runs unsigned — always set `WEBHOOK_SECRET` as an env var on Vercel so every instance verifies against the same value.
 
-**Auto webhook-secret bootstrap.** If `WEBHOOK_SECRET` is unset, `bot/config.py::_bootstrap_webhook_secret()` generates a 64-hex-character random secret and persists it in `.webhook_secret` at the project root (gitignored, chmod 0600). Subsequent boots read it back. The auto-registration above then passes it to Telegram via `secret_token`, so the bot is signed-by-default with zero manual setup. A read-only mount or other FS error falls back to an empty secret (unsigned webhook) rather than crashing the worker. To rotate: delete `.webhook_secret` and reload — boot generates a new one and re-registers. Tests must set `WEBHOOK_SECRET` in env (conftest.py does this) so the bootstrap doesn't litter the working tree.
-
-**Critical PA-specific constraints:**
-- **Free-tier outbound HTTPS whitelist.** `api.telegram.org`, `api.cerebras.ai`, `huggingface.co` are all on it. Most other domains aren't — if you add a feature that calls a new service, check `https://www.pythonanywhere.com/whitelist/` first. To request a new domain be added, post on the PA forums.
-- **Monthly renewal.** Free-tier web apps expire roughly every month. PA emails a week before. The user must click "Run until N days from today" in the Web tab to extend. There is no API endpoint for this on free tier — it must be done in the browser (or via paid plan upgrade).
-- **No SSH, no scheduled tasks on free tier.** Automation against PA is limited to the HTTP API for files/webapps/consoles, and consoles require a one-time browser visit before the API can send_input. Don't promise full hands-off automation.
-- **One webhook per bot token.** If you ever run `make run` locally, the production webhook is removed. Re-register it after by running `setWebhook` again — see README Step 12.
+**Critical Vercel-specific constraints:**
+- **Read-only, ephemeral filesystem.** State cannot live on disk — use Upstash Redis (`RedisStore`) for history / rate limit / preferences / dedupe / quiz. `SQLITE_PATH` and the `.webhook_secret` file do not persist on Vercel; `WEBHOOK_SECRET` must be an env var.
+- **60s function budget.** `vercel.json` sets `maxDuration=60`. Slow paths (HF generation) are timed out below this so the function returns before Telegram/Vercel cut it off.
+- **Cold starts, no boot hook.** Module-level code re-runs per cold start and there's no persistent "boot"; webhook + command-menu registration therefore happen via `_bootstrap_once()` on the first request per instance (see above).
+- **No background work after the response.** An instance can be frozen the moment the HTTP response returns, so anything that must complete (e.g. sending the reply) has to finish within the request; don't defer work to a thread that outlives the response.
 
 ---
 
@@ -238,10 +240,8 @@ The deployment target is `https://<your-pa-username>.pythonanywhere.com`. The sa
 - **Cerebras model names** — exact ID strings are required (e.g. `gpt-oss-120b`); a wrong format causes a 404. Check https://inference-docs.cerebras.ai/models for current IDs
 - **Telegram 4096 char limit** — `send_reply()` in `bot/helpers.py` handles splitting automatically
 - **Group chats** — `should_respond()` returns `True` for all messages, so the bot replies to every message in any chat it's in. If you need mention-gated or reply-gated behavior in groups, reintroduce it in `bot/helpers.py::should_respond`. The handler still strips `@<bot_username>` from text before sending to the AI
-- **Webhook secret must match** — if `WEBHOOK_SECRET` is set, the same value must be passed as `secret_token` in `setWebhook`. Mismatch causes all updates to return 403 and the bot goes silent
-- **Don't hand-edit tracked files on PA** — every `/api/deploy` runs `git reset --hard origin/<branch>`, so server-side edits to tracked files are silently discarded on the next push. Untracked files (`.env`, `.webhook_secret`, `bot.db`) are safe. Change code via git, always
-- **`/api/health` body is `OK <short-sha>`** — the deploy workflow string-matches this prefix to verify a deploy went live. Scripts should check the HTTP status or the `OK ` prefix, never exact body equality
-- **PA expects WSGI to expose `application`** — `pythonanywhere_wsgi.py` does `from api.index import app as application`. Renaming the Flask app variable would break this
+- **Webhook secret must match** — if `WEBHOOK_SECRET` is set, the same value must be passed as `secret_token` in `setWebhook`. Mismatch causes all updates to return 403 and the bot goes silent. On Vercel, `WEBHOOK_SECRET` must be an env var (the `.webhook_secret` file can't persist there)
+- **Command list is single-sourced** — both the `/help` text and the Telegram "/" menu come from `bot/commands.py::command_specs()`. Add/remove a command there (and its handler in `bot/handlers.py`); the menu re-syncs via `register_commands()` on the next cold start. Telegram caches the "/" menu client-side briefly — restart the app to force a refresh
+- **`/api/health` body is `OK <short-sha>`** — a truthful "which commit is live?" probe (SHA from `VERCEL_GIT_COMMIT_SHA`, git fallback). Scripts should check the HTTP status or the `OK ` prefix, never exact body equality
 - **Formatter strips unused imports between Edit calls** — if you do a two-step rewrite (add an import in one Edit, use it in the next), the formatter may remove the "unused" import between calls. Combine them into one Edit, or re-add the import after the second Edit
-- **`fcntl` is POSIX-only** — `api/index.py` guards `import fcntl` with `try/except ImportError` and routes its `/api/deploy` flock through `_lock_deploy_nb`/`_unlock_deploy` (no-ops without fcntl). A bare `import fcntl` breaks every test that imports `api.index` on Windows. Don't reintroduce one
 - **Windows `make.ps1 install` + the Microsoft Store Python stub** — typing `py`/`python` on Windows can hit a Store "app execution alias": a 0-byte stub under `%LOCALAPPDATA%\Microsoft\WindowsApps` that exits 0 and creates nothing. So `Get-Command py` succeeding (or `py -m venv` returning 0) proves nothing. `make.ps1`'s `New-RepoVenv` tries `py`→`python`→`python3` and keeps the first whose run actually produces `.venv\Scripts\python.exe`; don't "simplify" it back to a single `Get-Command` check. A student whose `python --version` works can still hit the old failure because the script tried `py` (the stub) first

@@ -8,14 +8,17 @@ _WEBHOOK_SECRET_FILE = _PROJECT_ROOT / ".webhook_secret"
 
 
 def _get_commit_sha() -> str:
-    """Return the short SHA of the deployed commit, or an empty string.
+    """Return the short SHA of the running commit, or an empty string.
 
-    Computed once at module import — so the value reflects the worker's
-    actual code, not whatever `git pull` did since boot. The auto-deploy
-    flow touches the WSGI file on pull, which spawns a fresh worker on
-    the next request with the new SHA. This makes /about a reliable
-    "what version is live right now" probe.
+    On Vercel there's no usable .git at runtime, so we prefer the
+    VERCEL_GIT_COMMIT_SHA env var Vercel injects at build time; we fall back
+    to `git rev-parse` for local dev. Computed once at module import so the
+    value reflects the code actually running — making /about (and /api/health)
+    a reliable "what version is live right now" probe.
     """
+    sha = os.environ.get("VERCEL_GIT_COMMIT_SHA", "").strip()
+    if sha:
+        return sha[:7]
     try:
         result = _subprocess.run(
             ["git", "-C", str(_PROJECT_ROOT), "rev-parse", "--short=7", "HEAD"],
@@ -37,14 +40,16 @@ def _bootstrap_webhook_secret(file_path: Path = _WEBHOOK_SECRET_FILE) -> str:
     """Return WEBHOOK_SECRET from env if set; otherwise read/generate a
     persistent random secret in `file_path`.
 
-    This makes the webhook signed-by-default: a fresh PA deploy with no
-    manual `openssl rand` step still rejects forged updates because the
-    bot auto-generates and persists a 64-hex-char secret on first run,
-    then registers it with Telegram via the boot-time `register_webhook()`.
+    This makes the webhook signed-by-default for local dev / persistent-disk
+    hosts: with no manual `openssl rand` step the bot auto-generates and
+    persists a 64-hex-char secret on first run, then registers it with Telegram
+    via register_webhook().
 
-    Precedence: env var > on-disk file > newly generated. Filesystem
-    errors fall back to the empty string so a read-only mount can't
-    crash worker boot — the webhook just stays unsigned in that case.
+    Precedence: env var > on-disk file > newly generated. Filesystem errors
+    fall back to the empty string so a read-only mount can't crash startup —
+    the webhook just stays unsigned in that case. NOTE: Vercel's filesystem is
+    read-only, so the file can't persist there; on Vercel set WEBHOOK_SECRET as
+    an environment variable so every instance verifies against the same value.
     """
     env_value = os.environ.get("WEBHOOK_SECRET", "").strip()
     if env_value:
@@ -73,10 +78,10 @@ def _bootstrap_webhook_secret(file_path: Path = _WEBHOOK_SECRET_FILE) -> str:
 TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"].strip()
 WEBHOOK_SECRET = _bootstrap_webhook_secret()
 
-# When set, the bot auto-registers this URL as the Telegram webhook on
-# worker boot and after every /api/deploy. Leave unset for local
-# polling (run_local.py). Example value on PA:
-#   WEBHOOK_URL=https://<your-pa-username>.pythonanywhere.com/api/webhook
+# When set, the bot re-asserts this URL as the Telegram webhook on the first
+# request after each cold start (api/index.py::_bootstrap_once). Leave unset for
+# local polling (run_local.py). Example value on Vercel:
+#   WEBHOOK_URL=https://<your-project>.vercel.app/api/webhook
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "").strip()
 
 # AI provider
@@ -93,7 +98,8 @@ DEFAULT_PROVIDER = "main"
 # SQLite, then stateless:
 #   1. Redis (Upstash REST) — set REDIS_REST_URL + REDIS_REST_TOKEN. This is
 #      the backend for serverless hosts (Vercel) where SQLite can't persist.
-#   2. SQLite — set SQLITE_PATH to a file on a persistent disk (PythonAnywhere).
+#   2. SQLite — set SQLITE_PATH to a file on a persistent, writable disk (local
+#      dev, or a VM/container with a volume). Does NOT work on Vercel (read-only FS).
 #   3. Stateless — none set: history / rate limiting / preferences / dedupe all
 #      degrade gracefully (the consumer modules check `store is None` and return
 #      safe defaults).
@@ -113,43 +119,13 @@ REDIS_REST_TOKEN = (
     or ""
 ).strip()
 
-# Label shown by the /about command. Defaults to "PythonAnywhere" since
-# that is the documented deployment target. Override to suit your host.
-HOSTING_LABEL = os.environ.get("HOSTING_LABEL", "PythonAnywhere").strip()
-
-# News (/news command). Optional. When NEWS_API_KEY is set, /news fetches
-# the latest Armenia headlines from an OpenAI-style-free news API. Defaults
-# target GNews (https://gnews.io) — its /search endpoint returns recent
-# articles matching NEWS_QUERY, newest first. Swap NEWS_API_URL / NEWS_QUERY
-# to use a different provider or region. PA caveat: the news domain is NOT on
-# the free-tier outbound whitelist, so this works locally but needs the domain
-# whitelisted to run on PythonAnywhere.
-#
-# NEWS_QUERY uses GNews's `in:title,description` attribute so "Armenia" must
-# appear in the headline or summary — this keeps /news Armenia-focused instead
-# of surfacing any global article that only mentions Armenia in passing.
-NEWS_API_KEY = os.environ.get("NEWS_API_KEY", "").strip()
-NEWS_API_URL = os.environ.get("NEWS_API_URL", "https://gnews.io/api/v4/search").strip()
-NEWS_QUERY = os.environ.get("NEWS_QUERY", "Armenia in:title,description").strip()
-NEWS_LANG = os.environ.get("NEWS_LANG", "en").strip()
-NEWS_REQUEST_TIMEOUT = 15  # seconds — fail fast so a slow news API can't wedge the worker
-
-# Worldwide news for /newsWorldwide. Unlike Armenia news (a keyword *search*),
-# world news uses GNews's /top-headlines endpoint, which returns ranked current
-# headlines with no search term — i.e. the interesting stories going on right
-# now. NEWS_WORLD_CATEGORY picks the slice: "general" (top overall) or one of
-# world / nation / business / technology / entertainment / sports / science /
-# health. Same NEWS_API_KEY, NEWS_LANG, and PA-whitelist caveat as above.
-NEWS_WORLD_API_URL = os.environ.get(
-    "NEWS_WORLD_API_URL", "https://gnews.io/api/v4/top-headlines"
-).strip()
-NEWS_WORLD_CATEGORY = os.environ.get("NEWS_WORLD_CATEGORY", "general").strip()
+# Label shown by the /about command. Defaults to "Vercel" since that is the
+# documented deployment target. Override to suit your host.
+HOSTING_LABEL = os.environ.get("HOSTING_LABEL", "Vercel").strip()
 
 # Wikipedia lookup (/lookup command). Grounds WORLD-history answers in the
-# intro of the best-matching Wikipedia article. Wikipedia (*.wikipedia.org) is
-# on PythonAnywhere's free-tier outbound whitelist, so unlike /news this works
-# on PA out of the box; on Vercel there is no whitelist at all. Wikipedia asks
-# API clients to send a descriptive User-Agent, so we set one.
+# intro of the best-matching Wikipedia article. Wikipedia asks API clients to
+# send a descriptive User-Agent, so we set one.
 WIKI_API_URL = os.environ.get("WIKI_API_URL", "https://en.wikipedia.org/w/api.php").strip()
 WIKI_USER_AGENT = os.environ.get(
     "WIKI_USER_AGENT",
@@ -179,25 +155,19 @@ ARMENIAN_TOPIC_KEYWORDS = [
     "pashinyan", "kocharyan", "sargsyan", "sarkisian", "ter-petrosyan",
 ]
 # Trusted Armenian-history sources the bot recommends for further reading.
-# These are NOT on PA's outbound whitelist and some actively block bots
-# (Armeniapedia sits behind an anti-bot challenge), so the bot LINKS to them
-# for the student to read rather than fetching them programmatically.
+# Some of these actively block bots (Armeniapedia sits behind an anti-bot
+# challenge), so the bot LINKS to them for the student to read rather than
+# fetching them programmatically.
 ARMENIAN_SOURCES = [
     ("Armeniapedia — the online Armenia encyclopedia", "https://www.armeniapedia.org"),
     ("100 Years, 100 Facts", "https://100years100facts.com"),
     ("Armenian-History.com", "https://www.armenian-history.com"),
 ]
 
-# Auto-deploy webhook secret. When set, /api/deploy accepts requests
-# that present this value in the X-Deploy-Secret header and runs
-# `git pull` + WSGI reload. When unset, /api/deploy returns 403 — the
-# endpoint is fail-closed.
-DEPLOY_SECRET = os.environ.get("DEPLOY_SECRET", "").strip()
-
 # Daily Quiz Arena (/quiz, /leaderboard, /subscribe + daily push). Question
-# generation uses the whitelisted Cerebras path (bot/providers._call_main), so
-# no new outbound host is needed. Scores / leaderboards / streaks / subscribers
-# live in the SQLite store as JSON blobs and degrade to no-ops in stateless mode.
+# generation uses the main Cerebras / OpenAI-compatible path
+# (bot/providers._call_main). Scores / leaderboards / streaks / subscribers
+# live in the store as JSON blobs and degrade to no-ops in stateless mode.
 QUIZ_POINTS = int(os.environ.get("QUIZ_POINTS", "10"))  # points per correct answer
 QUIZ_POLL_TTL = int(os.environ.get("QUIZ_POLL_TTL", "86400"))  # poll->answer scoring window (s)
 QUIZ_BOARD_TTL = int(os.environ.get("QUIZ_BOARD_TTL", "2592000"))  # per-chat leaderboard TTL (30d)
@@ -206,10 +176,8 @@ QUIZ_LEADERBOARD_SIZE = int(os.environ.get("QUIZ_LEADERBOARD_SIZE", "10"))  # ro
 
 # Daily quiz push. /api/tick (called by .github/workflows/daily-quiz.yml on a
 # schedule) broadcasts the day's quiz to every /subscribe'd chat. Fail-closed:
-# when TICK_SECRET is unset the endpoint returns 403. Deliberately a SEPARATE,
-# lower-privilege secret from DEPLOY_SECRET — a leaked DEPLOY_SECRET is remote
-# code execution (git reset + pip + reload); a leaked TICK_SECRET can only
-# trigger a quiz broadcast. Never share the two.
+# when TICK_SECRET is unset the endpoint returns 403. A leaked TICK_SECRET can
+# only trigger a quiz broadcast, nothing more.
 TICK_SECRET = os.environ.get("TICK_SECRET", "").strip()
 QUIZ_OPEN_PERIOD = int(os.environ.get("QUIZ_OPEN_PERIOD", "86400"))  # daily poll open window (s)
 QUIZ_MAX_BROADCAST = int(os.environ.get("QUIZ_MAX_BROADCAST", "100"))  # cap chats per daily push
@@ -278,8 +246,8 @@ MAX_MSG_LEN = 4096  # Telegram's character limit per message
 AI_REQUEST_TIMEOUT = 25  # seconds, applied per-attempt to OpenAI-compatible calls
 AI_RETRIES = 2  # total attempts (not extra retries) — 2 means one retry on failure
 # HF Gradio request timeout. Without this a hung `predict()` would occupy the
-# PA worker indefinitely; combined with the dedupe pre-claim, Telegram's
-# retries get silently dropped for ~10 min. Tuned to give ArmGPT enough
-# headroom for cold-start jitter while still freeing the worker before
-# Telegram's webhook timeout (~60s).
+# serverless function indefinitely; combined with the dedupe pre-claim,
+# Telegram's retries get silently dropped for ~10 min. Tuned to give ArmGPT
+# enough headroom for cold-start jitter while still returning before Telegram's
+# webhook timeout (~60s) and Vercel's maxDuration (60s).
 HF_REQUEST_TIMEOUT = 50

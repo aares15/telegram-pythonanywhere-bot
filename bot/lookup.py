@@ -4,17 +4,15 @@ The teacher's default answers come from the AI model's own knowledge. This
 module adds *grounded* lookups so a student can pull a topic from a citable
 source:
 
-  - WORLD history  → fetched live from the Wikipedia API and cited. Wikipedia
-    is on PythonAnywhere's outbound whitelist, so this works on PA out of the
-    box (unlike bot/news.py), and there is no whitelist on Vercel.
+  - WORLD history  → fetched live from the Wikipedia API and cited.
   - ARMENIAN history → deliberately NOT sourced from Wikipedia. The teacher
     answers from its own expertise and the bot points the student to dedicated
     Armenian sources (Armeniapedia, 100years100facts.com, Armenian-History.com).
     Those sites aren't whitelisted on PA and some block bots, so we LINK to them
     rather than fetch them.
 
-Graceful degradation, same style as bot/news.py: any network / API error
-returns None with a logged line rather than raising into the handler.
+Graceful degradation: any network / API error returns None with a logged
+line rather than raising into the handler.
 """
 
 from typing import Optional

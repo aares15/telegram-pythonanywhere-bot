@@ -3,22 +3,23 @@
 Every storage call in the bot reduces to six operations against a keyed
 value: get / set / set_nx / delete / incr / expire — all TTL-aware.
 SqliteStore implements them against a local SQLite file, which is the
-right fit for hosts with persistent disk (PythonAnywhere).
+right fit for local dev and persistent-disk hosts. (On serverless hosts
+like Vercel the filesystem is read-only/ephemeral — use RedisStore there.)
 
 Lazy expiry: expired rows are filtered on read and overwritten on
 write. There is no background sweeper — stale rows accumulate slowly
-but never affect correctness. PA free disk is 512MB; the bot's
-entire state stays well under 10MB even with hundreds of users.
+but never affect correctness. The bot's entire state stays well under
+10MB even with hundreds of users.
 
 WAL mode is enabled so the (currently unused) future case of
 multiple workers won't have readers blocking writers.
 
 Concurrency: the sqlite3 connection is opened with `check_same_thread=False`
-because keep_typing()'s daemon thread shares the worker. A `threading.Lock`
+because keep_typing()'s daemon thread shares the process. A `threading.Lock`
 serializes Python-level access so the (not thread-safe) Connection object
 isn't used concurrently. Multi-statement operations (incr, set_nx) use
-`BEGIN IMMEDIATE` so they're also atomic across processes if PA ever
-gives us multiple workers.
+`BEGIN IMMEDIATE` so they're also atomic across processes if there's ever
+more than one worker.
 """
 
 from __future__ import annotations

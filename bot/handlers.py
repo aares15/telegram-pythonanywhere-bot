@@ -10,10 +10,10 @@ from bot.config import (
     RATE_LIMIT,
 )
 from bot.ai import ask_ai
+from bot.commands import command_specs
 from bot.helpers import is_allowed, keep_typing, send_reply, should_respond
 from bot.history import clear_history
 from bot.lookup import further_reading, is_armenian_topic, wiki_lookup
-from bot.news import get_top_news, get_world_news, news_configured
 from bot.notes import delete_note, get_note, save_note
 from bot.preferences import get_provider, set_provider
 from bot.quiz import (
@@ -73,6 +73,26 @@ def cmd_start(message):
         "too. Ask me about a date, a person, an event — or anything else on "
         "your mind — and I'll explain it clearly. What are you curious about?"
     )
+    # New users don't know what's available yet, so follow the welcome with the
+    # command list — and tell them /help brings it back anytime.
+    lead = (
+        "Here's what I can do for you 👇 — type /help anytime to see this list "
+        "again:"
+    )
+    bot.send_message(message.chat.id, "\n".join([lead, ""] + _command_lines()))
+
+
+def _command_lines() -> list:
+    """The command reference shown by both /help and /start.
+
+    Built from bot.commands.command_specs() — the same source the Telegram "/"
+    menu is registered from — so the two never drift apart. /model is only
+    included when a HF space is configured.
+    """
+    lines = [help_line for (_name, _desc, help_line) in command_specs()]
+    lines.append("")
+    lines.append("Just type normally otherwise — no command needed for a regular question.")
+    return lines
 
 
 @bot.message_handler(commands=["help"], func=is_allowed)
@@ -82,32 +102,7 @@ def cmd_help(message):
         "history or anything from the wider past, and I'll explain it clearly "
         "and cheer on your questions. Here's what I can do for you:"
     )
-    lines = [
-        intro,
-        "",
-        "/start — click and get conversation started",
-        "/help — shows what i can do",
-        "/reset — wipe our chat history and start clean",
-        "/about — see what's running under the hood (model, storage, version)",
-        "/sha — show the live git commit SHA",
-        "/lookup <topic> — look up a history topic from a real source 📚",
-        "/quiz [topic] — start a trivia quiz (auto-scored) 🧠",
-        "/leaderboard — see the top quiz scorers in this chat",
-        "/subscribe — get a daily quiz here each morning (/unsubscribe to stop)",
-        "/compliment — get a little compliment to brighten your day",
-        "/fact — get an interesting fact to make you curious",
-        "/quote — get a motivational quote to inspire you",
-        "/newsArmenia — get the top 3 latest news in Armenia",
-        "/newsWorldwide — get the top 3 interesting news around the world",
-        "/remember <text> — save a note for later",
-        "/recall — retrieve your saved note",
-        "/forget — delete your saved note",
-    ]
-    if HF_SPACE_ID:
-        lines.append("/model — switch which AI brain I'm using")
-    lines.append("")
-    lines.append("Just type normally otherwise — no command needed for a regular question.")
-    bot.send_message(message.chat.id, "\n".join(lines))
+    bot.send_message(message.chat.id, "\n".join([intro, ""] + _command_lines()))
 
 
 @bot.message_handler(commands=["reset"], func=is_allowed)
@@ -133,12 +128,6 @@ def cmd_about(message):
     if COMMIT_SHA:
         lines.append(f"Version: {COMMIT_SHA}")
     bot.send_message(message.chat.id, "\n".join(lines))
-
-
-@bot.message_handler(commands=["sha"], func=is_allowed)
-def cmd_sha(message):
-    sha = COMMIT_SHA or "unknown"
-    bot.send_message(message.chat.id, f"Live SHA: {sha}")
 
 
 if HF_SPACE_ID:
@@ -179,89 +168,18 @@ if HF_SPACE_ID:
             bot.send_message(message.chat.id, "Switched to Main Provider.")
 
 
-@bot.message_handler(commands=["joke"], func=is_allowed)
-def cmd_joke(message):
-    reply = ask_ai(message.from_user.id, "Tell one short, clean programming joke.")
-    bot.send_message(message.chat.id, reply)
-
-
-@bot.message_handler(commands=["compliment"], func=is_allowed)
-def cmd_compliment(message):
-    name = message.from_user.first_name or "friend"
-    reply = ask_ai(
-        message.from_user.id,
-        f"Give {name} one short, warm, genuine compliment to brighten their day. "
-        "Keep it to a single friendly sentence and add a cheerful emoji.",
-    )
-    bot.send_message(message.chat.id, reply)
-
-
-@bot.message_handler(commands=["quote"], func=is_allowed)
-def cmd_quote(message):
-    name = message.from_user.first_name or "friend"
-    reply = ask_ai(
-        message.from_user.id,
-        f"Give {name} one short, genuine motivational quote to make them be motivated in every situation. "
-        "Keep it to a single friendly sentence and add a masculine emoji.",
-    )
-    bot.send_message(message.chat.id, reply)
-
 
 @bot.message_handler(commands=["fact"], func=is_allowed)
 def cmd_fact(message):
     name = message.from_user.first_name or "friend"
     reply = ask_ai(
         message.from_user.id,
-        f"Give {name} one interesting and true fact about that will make them curious. "
+        f"Give {name} one interesting and true fact about history that will make them curious. "
         "Keep it to a single sentence.",
     )
     bot.send_message(message.chat.id, reply)
 
 
-def _send_news(message, header, fetch):
-    """Shared body for the news commands. Checks the feature is configured,
-    fetches the top 3 items via `fetch`, and sends a numbered list under
-    `header`. `fetch` is get_top_news (Armenia) or get_world_news (world) —
-    both take a count and return a list of {title, source, url} or None."""
-    if not news_configured():
-        bot.send_message(
-            message.chat.id,
-            "News isn't set up for this bot yet. "
-            "Add a NEWS_API_KEY (free from https://gnews.io) to enable news.",
-        )
-        return
-    with keep_typing(message.chat.id):
-        items = fetch(3)
-    if not items:
-        bot.send_message(
-            message.chat.id,
-            "Couldn't fetch the news right now — please try again in a bit.",
-        )
-        return
-    lines = [header, ""]
-    for i, item in enumerate(items, start=1):
-        lines.append(f"{i}. {item['title']}")
-        detail = " — ".join(part for part in (item["source"], item["url"]) if part)
-        if detail:
-            lines.append(f"   {detail}")
-    send_reply(message, "\n".join(lines))
-
-
-# Multiple spellings are registered per command: Telegram delivers commands
-# verbatim (telebot matches them case-sensitively), so /newsArmenia and a
-# lowercase/underscored /newsarmenia both need to be listed to "just work".
-@bot.message_handler(
-    commands=["newsArmenia", "newsarmenia", "news_armenia", "news"], func=is_allowed
-)
-def cmd_news(message):
-    _send_news(message, "📰 Top latest news in Armenia:", get_top_news)
-
-
-@bot.message_handler(
-    commands=["newsWorldwide", "newsworldwide", "news_worldwide"], func=is_allowed
-)
-def cmd_news_worldwide(message):
-    _send_news(message, "🌍 Top interesting news around the world:", get_world_news)
 
 
 @bot.message_handler(commands=["remember"], func=is_allowed)

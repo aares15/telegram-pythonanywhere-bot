@@ -1,8 +1,8 @@
 """Tests for the auto webhook registration helper (bot.clients.register_webhook).
 
 These cover both the happy-path success message and the no-op + error
-branches, since this runs at every PA worker boot and after every
-/api/deploy — failures must never bubble up and crash the worker.
+branches, since this runs on the first webhook request after every cold
+start — failures must never bubble up and crash the request.
 """
 
 from unittest.mock import patch

@@ -1,10 +1,9 @@
 """Tests for the /api/tick daily-quiz broadcast endpoint.
 
-Mirrors tests/test_deploy.py's security tests: secret verification and
-fail-closed behavior. /api/tick only broadcasts a quiz, but it must still
-reject unauthenticated callers so nobody can spam subscribers — and it must
-authenticate with its OWN secret/header, distinct from the webhook and deploy
-secrets.
+Covers secret verification and fail-closed behavior. /api/tick only broadcasts
+a quiz, but it must still reject unauthenticated callers so nobody can spam
+subscribers — and it must authenticate with its OWN secret/header (X-Tick-Secret),
+distinct from the Telegram webhook secret.
 """
 
 from unittest.mock import MagicMock, patch

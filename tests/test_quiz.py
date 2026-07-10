@@ -1,6 +1,6 @@
 """Tests for the Daily Quiz Arena (bot/quiz.py) + its handlers.
 
-Mirrors tests/test_news.py's patch style. Uses a small in-memory FakeStore to
+Uses a small in-memory FakeStore to
 exercise the JSON-blob read-modify-write helpers, and MagicMock PollAnswers to
 drive scoring. conftest.py mocks telebot/openai, so no keys/network are needed.
 """

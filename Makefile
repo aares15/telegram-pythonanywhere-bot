@@ -1,4 +1,4 @@
-.PHONY: install test run deploy-pa
+.PHONY: install test run
 
 install:
 	python3 -m venv .venv
@@ -12,10 +12,3 @@ test:
 run:
 	@test -f .env || { echo "ERROR: .env not found. Copy .env.example to .env first."; exit 1; }
 	.venv/bin/python run_local.py
-
-# One-command PA deploy from your laptop. Reads .env for PA_USERNAME,
-# PA_API_TOKEN, TELEGRAM_BOT_TOKEN, AI_API_KEY (and any optional vars).
-# Idempotent — safe to re-run for recovery or to push a fresh .env.
-deploy-pa:
-	@test -f .env || { echo "ERROR: .env not found. Copy .env.example to .env first."; exit 1; }
-	./scripts/pa_deploy.sh
