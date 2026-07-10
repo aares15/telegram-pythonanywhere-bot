@@ -175,6 +175,11 @@ QUIZ_POLL_TTL = int(os.environ.get("QUIZ_POLL_TTL", "86400"))  # poll->answer sc
 QUIZ_BOARD_TTL = int(os.environ.get("QUIZ_BOARD_TTL", "2592000"))  # per-chat leaderboard TTL (30d)
 QUIZ_STREAK_TTL = int(os.environ.get("QUIZ_STREAK_TTL", "2592000"))  # per-user streak TTL (30d)
 QUIZ_LEADERBOARD_SIZE = int(os.environ.get("QUIZ_LEADERBOARD_SIZE", "10"))  # rows shown by /leaderboard
+# Personalized /quiz: N questions generated from the user's own conversation
+# ("what they asked + what the teacher explained"), asked one at a time, scored
+# at the end. The in-progress session (questions + progress) lives in the store.
+QUIZ_PERSONAL_COUNT = int(os.environ.get("QUIZ_PERSONAL_COUNT", "6"))  # questions per personalized quiz
+QUIZ_SESSION_TTL = int(os.environ.get("QUIZ_SESSION_TTL", "3600"))  # personalized-quiz session lifetime (s)
 
 # Daily quiz push. /api/tick (called by .github/workflows/daily-quiz.yml on a
 # schedule) broadcasts the day's quiz to every /subscribe'd chat. Fail-closed:

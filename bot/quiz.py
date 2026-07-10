@@ -27,8 +27,10 @@ from bot.config import (
     QUIZ_LEADERBOARD_SIZE,
     QUIZ_MAX_BROADCAST,
     QUIZ_OPEN_PERIOD,
+    QUIZ_PERSONAL_COUNT,
     QUIZ_POINTS,
     QUIZ_POLL_TTL,
+    QUIZ_SESSION_TTL,
     QUIZ_STREAK_TTL,
 )
 from bot.providers import _call_main
@@ -39,6 +41,9 @@ _BOARD_KEY = "quiz:board:{chat_id}"     # {"<uid>": {name, score}}
 _STREAK_KEY = "quiz:streak:{user_id}"   # {last_correct_date, streak_count, best_streak}
 _SUBS_KEY = "quiz:subscribers"          # [chat_id, ...]
 _TICK_KEY = "quiz:tick:{day}"           # "1" — once-per-day broadcast claim
+# Personalized quiz (per-user session drawn from their own conversation):
+_SESSION_KEY = "quiz:session:{chat_id}:{user_id}"  # {questions:[...], index, score}
+_SPOLL_KEY = "quiz:spoll:{poll_id}"                # {chat_id, user_id, q_index, correct}
 
 # Telegram quiz-poll hard limits (send_poll rejects anything past these).
 _MAX_QUESTION = 300
@@ -143,6 +148,236 @@ def generate_question(topic: Optional[str] = None) -> Optional[dict]:
             return quiz
         print(f"Quiz parse/validate failed (attempt {attempt + 1}/2): {(raw or '')[:200]!r}")
     return None
+
+
+# ── Personalized quiz (from the user's own conversation) ─────────────────────
+
+_PERSONAL_SYSTEM = (
+    "You are a quiz master creating a short review quiz for a student, based "
+    "ONLY on the conversation transcript the user provides (a chat between the "
+    "student and their history teacher). Write multiple-choice questions that "
+    "test what the STUDENT learned from the teacher's explanations. Base every "
+    "question and its options strictly on facts stated in the transcript — do "
+    "not add outside facts. Reply with STRICT minified JSON only (no prose, no "
+    "markdown fences): a JSON ARRAY of objects, each "
+    '{"question": str, "options": [str, str, str, str], '
+    '"correct_index": int, "explanation": str}. Exactly 4 options each. '
+    "question <=200 chars, each option <=80 chars, explanation <=180 chars. "
+    "correct_index is 0-based into options."
+)
+
+# Bound the transcript fed to the model: cap each message and the whole blob so
+# a long history can't blow the prompt size / latency budget.
+_MSG_CAP = 800
+_TRANSCRIPT_CAP = 6000
+
+
+def _transcript_from_history(history: list) -> str:
+    """Render conversation history into a 'Student:/Teacher:' transcript (most
+    recent kept when it exceeds the cap). Empty string if nothing usable."""
+    lines = []
+    for m in history or []:
+        content = str(m.get("content", "")).strip()
+        if not content:
+            continue
+        who = "Student" if m.get("role") == "user" else "Teacher"
+        lines.append(f"{who}: {content[:_MSG_CAP]}")
+    return "\n".join(lines)[-_TRANSCRIPT_CAP:]
+
+
+def _extract_json_array(raw: str) -> Optional[list]:
+    """Parse a JSON array of questions from a model reply. Tolerates fences /
+    prose (first '[' .. last ']') and a {"questions": [...]} wrapper."""
+    if not raw:
+        return None
+    start, end = raw.find("["), raw.rfind("]")
+    if start != -1 and end != -1 and end > start:
+        try:
+            data = json.loads(raw[start : end + 1])
+            if isinstance(data, list):
+                return data
+        except (ValueError, TypeError):
+            pass
+    obj = _extract_json(raw)
+    if isinstance(obj, dict) and isinstance(obj.get("questions"), list):
+        return obj["questions"]
+    return None
+
+
+def build_personal_quiz(history: list, n: int = QUIZ_PERSONAL_COUNT) -> Optional[list]:
+    """Generate up to `n` validated questions grounded in the user's own
+    conversation. Returns a list of quiz dicts, or None on any failure. Never
+    raises. Two attempts, each a single retrying _call_main, to stay under
+    Telegram's ~60s webhook window."""
+    transcript = _transcript_from_history(history)
+    if not transcript:
+        return None
+    messages = [
+        {"role": "system", "content": _PERSONAL_SYSTEM},
+        {"role": "user", "content": f"Transcript:\n{transcript}\n\nWrite exactly {n} questions now as a JSON array."},
+    ]
+    for attempt in range(2):
+        try:
+            raw = _call_main(messages, retries=1)
+        except Exception as e:
+            print(f"Personal quiz generation error (attempt {attempt + 1}/2): {e}")
+            continue
+        items = _extract_json_array(raw or "")
+        if items:
+            questions = [q for q in (_validate(it) for it in items) if q]
+            if questions:
+                return questions[:n]
+        print(f"Personal quiz parse failed (attempt {attempt + 1}/2): {(raw or '')[:200]!r}")
+    return None
+
+
+def _session_key(chat_id, user_id) -> str:
+    return _SESSION_KEY.format(chat_id=chat_id, user_id=user_id)
+
+
+def _load_session(chat_id, user_id) -> Optional[dict]:
+    if store is None:
+        return None
+    try:
+        raw = store.get(_session_key(chat_id, user_id))
+        return json.loads(raw) if raw else None
+    except Exception as e:
+        print(f"Store read error (quiz session): {e}")
+        return None
+
+
+def _save_session(chat_id, user_id, session: dict) -> None:
+    if store is None:
+        return
+    try:
+        store.set(_session_key(chat_id, user_id), json.dumps(session), ex=QUIZ_SESSION_TTL)
+    except Exception as e:
+        print(f"Store write error (quiz session): {e}")
+
+
+def _delete_session(chat_id, user_id) -> None:
+    if store is None:
+        return
+    try:
+        store.delete(_session_key(chat_id, user_id))
+    except Exception as e:
+        print(f"Store delete error (quiz session): {e}")
+
+
+def start_session(chat_id: int, user_id: int, questions: list) -> bool:
+    """Begin a personalized quiz: store the questions + zeroed progress. Returns
+    False (no store / write failed) so the caller can bail gracefully."""
+    if store is None or not questions:
+        return False
+    _save_session(chat_id, user_id, {"questions": questions, "index": 0, "score": 0})
+    return _load_session(chat_id, user_id) is not None
+
+
+def send_next_question(chat_id: int, user_id: int) -> bool:
+    """Send the session's current question as a quiz poll and map the poll back
+    to the session so the answer can advance it. Returns False if there's no
+    active session, it's already finished, or the send failed."""
+    session = _load_session(chat_id, user_id)
+    if not session:
+        return False
+    questions = session.get("questions", [])
+    idx = session.get("index", 0)
+    if idx >= len(questions):
+        return False
+    q = questions[idx]
+    prompt = f"Q{idx + 1}/{len(questions)}: {q['question']}"[:_MAX_QUESTION]
+    try:
+        msg = bot.send_poll(
+            chat_id,
+            prompt,
+            q["options"],
+            type="quiz",
+            correct_option_id=q["correct_index"],
+            explanation=q["explanation"] or None,
+            is_anonymous=False,  # required so poll_answer reports who answered
+            allows_multiple_answers=False,
+        )
+    except Exception as e:
+        print(f"send_poll failed (personal quiz): {e}")
+        return False
+    poll = getattr(msg, "poll", None)
+    if poll is None:
+        return False
+    if store is not None:
+        try:
+            store.set(
+                _SPOLL_KEY.format(poll_id=poll.id),
+                json.dumps({"chat_id": chat_id, "user_id": user_id, "q_index": idx, "correct": q["correct_index"]}),
+                ex=QUIZ_SESSION_TTL,
+            )
+        except Exception as e:
+            print(f"Store write error (quiz spoll): {e}")
+            return False
+    return True
+
+
+def _finish_session(chat_id: int, user_id: int, score: int, total: int) -> None:
+    """Clear the session and send the final score with a bit of encouragement."""
+    _delete_session(chat_id, user_id)
+    pct = (score / total) if total else 0
+    if pct >= 1:
+        note = "Perfect score! 🏆 You really know your history."
+    elif pct >= 0.7:
+        note = "Great job! 🎉"
+    elif pct >= 0.4:
+        note = "Nice effort — review the ones you missed and try again. 👍"
+    else:
+        note = "Keep studying — ask me more and you'll ace the next one. 📚"
+    try:
+        bot.send_message(chat_id, f"🏁 Quiz complete! You scored {score}/{total}.\n{note}")
+    except Exception as e:
+        print(f"send_message failed (quiz result): {e}")
+
+
+def apply_session_answer(poll_answer) -> bool:
+    """Handle a poll answer belonging to a personalized-quiz session: score it,
+    advance the session, and send the next question or the final result.
+
+    Returns True if the answer belonged to a session (handled — the caller must
+    NOT fall through to the leaderboard scorer), False otherwise. Never raises.
+    """
+    if store is None:
+        return False
+    poll_id = getattr(poll_answer, "poll_id", None)
+    if not poll_id:
+        return False
+    try:
+        raw = store.get(_SPOLL_KEY.format(poll_id=poll_id))
+    except Exception as e:
+        print(f"Store read error (quiz spoll): {e}")
+        return False
+    if not raw:
+        return False  # not a personalized-quiz poll → caller uses legacy scorer
+    try:
+        meta = json.loads(raw)
+    except (ValueError, TypeError):
+        return True  # it was ours but is corrupt — swallow, don't double-handle
+    user = getattr(poll_answer, "user", None)
+    if user is None or user.id != meta.get("user_id"):
+        return True  # someone else answered this user's quiz poll — ignore
+    option_ids = getattr(poll_answer, "option_ids", None) or []
+    if not option_ids:
+        return True  # retraction (quiz polls can't really retract) — ignore
+    session = _load_session(meta["chat_id"], meta["user_id"])
+    if not session:
+        return True  # session expired / cleared
+    if meta.get("q_index") != session.get("index"):
+        return True  # duplicate redelivery or stale answer — already advanced
+    if option_ids[0] == meta.get("correct"):
+        session["score"] = int(session.get("score", 0)) + 1
+    session["index"] = int(session.get("index", 0)) + 1
+    total = len(session.get("questions", []))
+    if session["index"] < total:
+        _save_session(meta["chat_id"], meta["user_id"], session)
+        send_next_question(meta["chat_id"], meta["user_id"])
+    else:
+        _finish_session(meta["chat_id"], meta["user_id"], session["score"], total)
+    return True
 
 
 # ── Scoring / leaderboard / streak ───────────────────────────────────────────

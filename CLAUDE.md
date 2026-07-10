@@ -32,7 +32,7 @@ telegram-pythonanywhere-bot/
 │   ├── rate_limit.py     # Per-user daily message rate limiting via store (graceful degradation)
 │   ├── dedupe.py         # Drops repeated update_ids when Telegram retries (graceful degradation)
 │   ├── helpers.py        # send_reply(), keep_typing() context manager, should_respond() utilities
-│   ├── quiz.py           # Daily Quiz Arena — generation, scoring, leaderboards, daily broadcast
+│   ├── quiz.py           # Quiz engine — personalized /quiz (6 Qs from the user's own history, sequential, scored) + Daily Quiz broadcast, scoring, leaderboards
 │   └── handlers.py       # All Telegram command and message handlers — add new commands here
 ├── tests/
 │   ├── conftest.py       # Mocks env vars and external packages (telebot, openai, flask)

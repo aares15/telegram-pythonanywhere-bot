@@ -308,7 +308,7 @@ telegram-pythonanywhere-bot/
 │   ├── history.py        # Conversation memory (via store, graceful degradation)
 │   ├── rate_limit.py     # Per-user rate limiting (via store, graceful degradation)
 │   ├── dedupe.py         # Drops repeated update_ids when Telegram retries
-│   ├── quiz.py           # Daily Quiz Arena — generation, scoring, leaderboards, daily broadcast
+│   ├── quiz.py           # Quiz engine — personalized /quiz (6 Qs from the user's own chat) + Daily Quiz broadcast, scoring, leaderboards
 │   ├── helpers.py        # Utilities (send_reply, keep_typing, should_respond)
 │   └── handlers.py       # Telegram commands — add new commands here
 ├── tests/                # Offline test suite (mocked Telegram + OpenAI clients)
@@ -349,8 +349,8 @@ Windows users without `make` can use the PowerShell equivalent: `.\make.ps1 inst
 | `/reset` | Clear your conversation history |
 | `/about` | Show model, storage, and hosting info |
 | `/lookup <topic>` | Look up a history topic from a real source — world topics are grounded in a cited Wikipedia article; Armenian topics are answered from the teacher's expertise plus links to trusted Armenian sources (never Wikipedia) |
-| `/quiz [topic]` | Start an auto-scored trivia quiz |
-| `/leaderboard` | Show the top quiz scorers in this chat |
+| `/quiz` | Take a 6-question quiz built from what you've discussed with the bot, scored at the end |
+| `/leaderboard` | Show the top scorers from the Daily Quiz in this chat |
 | `/subscribe` | Get a daily quiz in this chat each morning (`/unsubscribe` to stop) |
 | `/fact` | Get an interesting history fact |
 | `/remember <text>`, `/recall`, `/forget` | Save, retrieve, and delete a personal note |

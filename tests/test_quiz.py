@@ -369,61 +369,220 @@ def test_run_daily_quiz_generation_failure_releases_claim():
     assert claim not in fs.data  # claim released so a re-dispatch can retry
 
 
+# ── personalized quiz (transcript, build, session flow) ──────────────────────
+
+_HISTORY = [
+    {"role": "user", "content": "who was Tigran the Great?"},
+    {"role": "assistant", "content": "Tigran II ruled Armenia at its height..."},
+]
+
+_SIX = [
+    {"question": f"Q{i}?", "options": ["a", "b", "c", "d"], "correct_index": 0, "explanation": "e"}
+    for i in range(6)
+]
+
+
+def _poll_bot(prefix="sp"):
+    """Mock bot whose send_poll returns a unique poll id each call (sp0, sp1, …),
+    mirroring Telegram — each poll really has a distinct id."""
+    mb = MagicMock()
+    counter = {"n": 0}
+
+    def _send(*args, **kwargs):
+        i = counter["n"]
+        counter["n"] += 1
+        return MagicMock(poll=MagicMock(id=f"{prefix}{i}"))
+
+    mb.send_poll.side_effect = _send
+    return mb
+
+
+def test_transcript_labels_roles():
+    t = quiz._transcript_from_history(_HISTORY)
+    assert "Student: who was Tigran the Great?" in t
+    assert "Teacher: Tigran II ruled" in t
+
+
+def test_transcript_empty_without_content():
+    assert quiz._transcript_from_history([{"role": "user", "content": "  "}]) == ""
+
+
+def test_extract_json_array_plain():
+    assert quiz._extract_json_array('[{"a": 1}, {"b": 2}]') == [{"a": 1}, {"b": 2}]
+
+
+def test_extract_json_array_wrapper():
+    assert quiz._extract_json_array('{"questions": [{"a": 1}]}') == [{"a": 1}]
+
+
+def test_extract_json_array_none():
+    assert quiz._extract_json_array("not an array") is None
+
+
+def test_build_personal_quiz_parses():
+    with patch.object(quiz, "_call_main", return_value=json.dumps(_SIX)):
+        out = quiz.build_personal_quiz(_HISTORY, n=6)
+    assert out is not None
+    assert len(out) == 6
+    assert out[0]["question"] == "Q0?"
+
+
+def test_build_personal_quiz_empty_history_skips_ai():
+    with patch.object(quiz, "_call_main") as call:
+        assert quiz.build_personal_quiz([]) is None
+        call.assert_not_called()
+
+
+def test_build_personal_quiz_none_on_error():
+    with patch.object(quiz, "_call_main", side_effect=RuntimeError("boom")):
+        assert quiz.build_personal_quiz(_HISTORY) is None
+
+
+def test_start_session_and_send_first_question():
+    fs = FakeStore()
+    mb = _poll_bot()
+    with patch.object(quiz, "store", fs), patch.object(quiz, "bot", mb):
+        assert quiz.start_session(456, 1, _SIX) is True
+        assert quiz.send_next_question(456, 1) is True
+    assert fs.data[quiz._SESSION_KEY.format(chat_id=456, user_id=1)]
+    spoll = json.loads(fs.data[quiz._SPOLL_KEY.format(poll_id="sp0")])
+    assert spoll["q_index"] == 0 and spoll["user_id"] == 1
+    assert mb.send_poll.call_args[0][1].startswith("Q1/6:")
+
+
+def test_apply_session_answer_scores_and_advances():
+    fs = FakeStore()
+    mb = _poll_bot()
+    with patch.object(quiz, "store", fs), patch.object(quiz, "bot", mb):
+        quiz.start_session(456, 1, _SIX)
+        quiz.send_next_question(456, 1)  # Q1 → poll "sp0"
+        handled = quiz.apply_session_answer(_pa(poll_id="sp0", user_id=1, option_ids=[0]))
+    assert handled is True
+    session = json.loads(fs.data[quiz._SESSION_KEY.format(chat_id=456, user_id=1)])
+    assert session["index"] == 1
+    assert session["score"] == 1  # correct_index 0 chosen
+    assert mb.send_poll.call_count == 2  # next question auto-sent
+
+
+def test_apply_session_answer_unknown_poll_returns_false():
+    with patch.object(quiz, "store", FakeStore()):
+        assert quiz.apply_session_answer(_pa(poll_id="ghost", user_id=1)) is False
+
+
+def test_apply_session_answer_duplicate_not_double_counted():
+    fs = FakeStore()
+    mb = _poll_bot()
+    with patch.object(quiz, "store", fs), patch.object(quiz, "bot", mb):
+        quiz.start_session(456, 1, _SIX)
+        quiz.send_next_question(456, 1)
+        quiz.apply_session_answer(_pa(poll_id="sp0", user_id=1, option_ids=[0]))
+        again = quiz.apply_session_answer(_pa(poll_id="sp0", user_id=1, option_ids=[0]))
+    assert again is True  # handled (swallowed)
+    session = json.loads(fs.data[quiz._SESSION_KEY.format(chat_id=456, user_id=1)])
+    assert session["index"] == 1 and session["score"] == 1
+
+
+def test_apply_session_answer_final_reports_score():
+    fs = FakeStore()
+    mb = _poll_bot()
+    with patch.object(quiz, "store", fs), patch.object(quiz, "bot", mb):
+        quiz.start_session(456, 1, [dict(VALID)])  # single-question quiz
+        quiz.send_next_question(456, 1)  # poll "sp0", correct_index 2
+        quiz.apply_session_answer(_pa(poll_id="sp0", user_id=1, option_ids=[2]))
+    assert quiz._SESSION_KEY.format(chat_id=456, user_id=1) not in fs.data
+    assert "1/1" in mb.send_message.call_args[0][1]
+
+
+def test_apply_session_answer_ignores_other_user():
+    fs = FakeStore()
+    mb = _poll_bot()
+    with patch.object(quiz, "store", fs), patch.object(quiz, "bot", mb):
+        quiz.start_session(456, 1, _SIX)
+        quiz.send_next_question(456, 1)
+        handled = quiz.apply_session_answer(_pa(poll_id="sp0", user_id=999, option_ids=[0]))
+    assert handled is True  # it's a session poll, but not this user's — swallowed
+    session = json.loads(fs.data[quiz._SESSION_KEY.format(chat_id=456, user_id=1)])
+    assert session["index"] == 0  # not advanced by the wrong user
+
+
 # ── handlers ─────────────────────────────────────────────────────────────────
 
 
-def test_cmd_quiz_sends_poll():
+def test_cmd_quiz_needs_store():
     from tests.test_handlers import make_message
 
     with (
-        patch("bot.handlers.generate_question", return_value=dict(VALID)),
-        patch("bot.handlers.keep_typing"),
-        patch("bot.handlers.save_poll") as mock_save,
+        patch("bot.handlers.store", None),
+        patch("bot.handlers.build_personal_quiz") as gen,
         patch("bot.handlers.bot") as mock_bot,
     ):
-        mock_bot.send_poll.return_value = MagicMock(poll=MagicMock(id="xyz"))
         from bot.handlers import cmd_quiz
 
         cmd_quiz(make_message(text="/quiz"))
-        kwargs = mock_bot.send_poll.call_args.kwargs
-        assert kwargs["type"] == "quiz"
-        assert kwargs["is_anonymous"] is False
-        assert kwargs["correct_option_id"] == VALID["correct_index"]
-        mock_save.assert_called_once()
-        assert mock_save.call_args[0][0] == "xyz"
+        gen.assert_not_called()
+        assert "memory" in mock_bot.send_message.call_args[0][1]
+
+
+def test_cmd_quiz_needs_conversation_first():
+    from tests.test_handlers import make_message
+
+    with (
+        patch("bot.handlers.store", MagicMock()),
+        patch("bot.handlers.get_history", return_value=[]),
+        patch("bot.handlers.build_personal_quiz") as gen,
+        patch("bot.handlers.bot") as mock_bot,
+    ):
+        from bot.handlers import cmd_quiz
+
+        cmd_quiz(make_message(text="/quiz"))
+        gen.assert_not_called()
+        assert "chat first" in mock_bot.send_message.call_args[0][1].lower()
+
+
+def test_cmd_quiz_starts_session_and_sends_first():
+    from tests.test_handlers import make_message
+
+    history = [
+        {"role": "user", "content": "tell me about Urartu"},
+        {"role": "assistant", "content": "Urartu was an ancient kingdom..."},
+    ]
+    with (
+        patch("bot.handlers.store", MagicMock()),
+        patch("bot.handlers.get_history", return_value=history),
+        patch("bot.handlers.keep_typing"),
+        patch("bot.handlers.build_personal_quiz", return_value=_SIX) as gen,
+        patch("bot.handlers.start_session", return_value=True) as start,
+        patch("bot.handlers.send_next_question", return_value=True) as nxt,
+        patch("bot.handlers.bot"),
+    ):
+        from bot.handlers import cmd_quiz
+
+        cmd_quiz(make_message(text="/quiz"))
+        gen.assert_called_once_with(history)
+        start.assert_called_once()
+        nxt.assert_called_once()
 
 
 def test_cmd_quiz_generation_failure():
     from tests.test_handlers import make_message
 
+    history = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "hello there"},
+    ]
     with (
-        patch("bot.handlers.generate_question", return_value=None),
+        patch("bot.handlers.store", MagicMock()),
+        patch("bot.handlers.get_history", return_value=history),
         patch("bot.handlers.keep_typing"),
-        patch("bot.handlers.save_poll") as mock_save,
+        patch("bot.handlers.build_personal_quiz", return_value=None),
+        patch("bot.handlers.start_session") as start,
         patch("bot.handlers.bot") as mock_bot,
     ):
         from bot.handlers import cmd_quiz
 
         cmd_quiz(make_message(text="/quiz"))
-        mock_bot.send_poll.assert_not_called()
-        mock_save.assert_not_called()
+        start.assert_not_called()
         assert "Couldn't" in mock_bot.send_message.call_args[0][1]
-
-
-def test_cmd_quiz_parses_topic():
-    from tests.test_handlers import make_message
-
-    with (
-        patch("bot.handlers.generate_question", return_value=dict(VALID)) as gen,
-        patch("bot.handlers.keep_typing"),
-        patch("bot.handlers.save_poll"),
-        patch("bot.handlers.bot") as mock_bot,
-    ):
-        mock_bot.send_poll.return_value = MagicMock(poll=MagicMock(id="x"))
-        from bot.handlers import cmd_quiz
-
-        cmd_quiz(make_message(text="/quiz armenian history"))
-        gen.assert_called_once_with("armenian history")
 
 
 def test_cmd_leaderboard_stateless():
@@ -493,9 +652,60 @@ def test_cmd_unsubscribe_removed():
         assert "Unsubscribed" in mock_bot.send_message.call_args[0][1]
 
 
-def test_on_poll_answer_delegates():
-    with patch("bot.handlers.apply_poll_answer") as mock_apply:
+def test_on_poll_answer_delegates_to_legacy_when_not_a_session():
+    with (
+        patch("bot.handlers.apply_session_answer", return_value=False),
+        patch("bot.handlers.apply_poll_answer") as mock_apply,
+    ):
         from bot.handlers import on_poll_answer
 
         on_poll_answer(_pa())
         mock_apply.assert_called_once()
+
+
+def test_on_poll_answer_prefers_session():
+    with (
+        patch("bot.handlers.apply_session_answer", return_value=True) as sess,
+        patch("bot.handlers.apply_poll_answer") as legacy,
+    ):
+        from bot.handlers import on_poll_answer
+
+        on_poll_answer(_pa())
+        sess.assert_called_once()
+        legacy.assert_not_called()
+
+
+def test_personal_quiz_end_to_end():
+    """Drive the whole feature through the REAL engine: cmd_quiz builds a quiz
+    from history, asks 6 questions one at a time, and reports the final score."""
+    from tests.test_handlers import make_message
+    import bot.handlers as handlers
+    import bot.history as history
+
+    fs = FakeStore()
+    fs.data["chat:123"] = json.dumps(
+        [
+            {"role": "user", "content": "who was Tigran the Great?"},
+            {"role": "assistant", "content": "Tigran II expanded Armenia to its height..."},
+        ]
+    )
+    mb = _poll_bot()  # send_poll → sp0, sp1, …; send_message captured
+
+    with (
+        patch.object(quiz, "store", fs),
+        patch.object(quiz, "bot", mb),
+        patch.object(quiz, "_call_main", return_value=json.dumps(_SIX)),
+        patch.object(history, "store", fs),
+        patch.object(handlers, "store", fs),
+        patch.object(handlers, "bot", mb),
+        patch("bot.handlers.keep_typing"),
+    ):
+        handlers.cmd_quiz(make_message(text="/quiz", user_id=123, chat_id=456))
+        # All six answered correctly (every _SIX question has correct_index 0).
+        for i in range(6):
+            handlers.on_poll_answer(_pa(poll_id=f"sp{i}", user_id=123, option_ids=[0]))
+
+    # Six polls sent, session cleared, and the final score reported.
+    assert mb.send_poll.call_count == 6
+    assert quiz._SESSION_KEY.format(chat_id=456, user_id=123) not in fs.data
+    assert "6/6" in mb.send_message.call_args[0][1]

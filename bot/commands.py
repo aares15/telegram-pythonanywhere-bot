@@ -26,7 +26,7 @@ COMMANDS = [
     ("reset", "Wipe our chat history and start clean", "/reset — wipe our chat history and start clean"),
     ("about", "Model, storage, and version info", "/about — see what's running under the hood (model, storage, version)"),
     ("lookup", "Look up a history topic from a real source", "/lookup <topic> — look up a history topic from a real source 📚"),
-    ("quiz", "Start a trivia quiz (auto-scored)", "/quiz [topic] — start a trivia quiz (auto-scored) 🧠"),
+    ("quiz", "Quiz yourself on what you've learned", "/quiz — take a quiz on what we've covered, scored at the end 🧠"),
     ("leaderboard", "See the top quiz scorers in this chat", "/leaderboard — see the top quiz scorers in this chat"),
     ("subscribe", "Get a daily quiz here each morning", "/subscribe — get a daily quiz here each morning (/unsubscribe to stop)"),
     ("fact", "Get an interesting history fact", "/fact — get an interesting fact to make you curious"),

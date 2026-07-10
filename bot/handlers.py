@@ -12,15 +12,17 @@ from bot.config import (
 from bot.ai import ask_ai
 from bot.commands import command_specs
 from bot.helpers import is_allowed, keep_typing, send_reply, should_respond
-from bot.history import clear_history
+from bot.history import clear_history, get_history
 from bot.lookup import further_reading, is_armenian_topic, wiki_lookup
 from bot.notes import delete_note, get_note, save_note
 from bot.preferences import get_provider, set_provider
 from bot.quiz import (
     apply_poll_answer,
-    generate_question,
+    apply_session_answer,
+    build_personal_quiz,
     get_leaderboard,
-    save_poll,
+    send_next_question,
+    start_session,
     subscribe,
     unsubscribe,
 )
@@ -279,36 +281,42 @@ def cmd_lookup(message):
 
 @bot.message_handler(commands=["quiz", "trivia"], func=is_allowed)
 def cmd_quiz(message):
-    parts = (message.text or "").split(maxsplit=1)
-    topic = parts[1].strip() if len(parts) > 1 else None
-    with keep_typing(message.chat.id):
-        quiz = generate_question(topic)
-    if not quiz:
+    """Personalized quiz: N questions drawn from THIS user's own conversation
+    (what they asked + what the teacher explained), asked one at a time, scored
+    at the end. Needs a store (to hold history + the in-progress session) and
+    enough conversation to quiz on."""
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    if store is None:
+        bot.send_message(chat_id, "Quizzes need memory, which isn't set up for this bot yet.")
+        return
+    # "What he learned" = the rolling conversation history.
+    history = [m for m in get_history(user_id) if str(m.get("content", "")).strip()]
+    if len(history) < 2:
         bot.send_message(
-            message.chat.id,
-            "Couldn't spin up a quiz right now — give it another go in a moment.",
+            chat_id,
+            "Let's chat first! 📚 Ask me about some history — a person, an event, a date — "
+            "and once we've covered a few things, /quiz will test you on what you learned.",
         )
         return
-    try:
-        # is_anonymous=False is REQUIRED: anonymous polls don't report who
-        # answered, so scoring in group chats would be impossible otherwise.
-        sent = bot.send_poll(
-            message.chat.id,
-            quiz["question"],
-            quiz["options"],
-            type="quiz",
-            correct_option_id=quiz["correct_index"],
-            explanation=quiz["explanation"] or None,
-            is_anonymous=False,
-            allows_multiple_answers=False,
+    with keep_typing(chat_id):
+        questions = build_personal_quiz(history)
+    if not questions:
+        bot.send_message(
+            chat_id,
+            "Couldn't put a quiz together right now — give it another go in a moment.",
         )
-    except Exception as e:
-        print(f"send_poll failed in /quiz: {e}")
-        bot.send_message(message.chat.id, "Couldn't post the quiz — try again in a bit.")
         return
-    poll = getattr(sent, "poll", None)
-    if poll is not None:
-        save_poll(poll.id, message.chat.id, quiz["correct_index"])
+    if not start_session(chat_id, user_id, questions):
+        bot.send_message(chat_id, "Couldn't start the quiz — try again in a bit.")
+        return
+    bot.send_message(
+        chat_id,
+        f"🧠 Quiz time! {len(questions)} questions on what we've covered — "
+        "answer each one and I'll tally your score at the end.",
+    )
+    if not send_next_question(chat_id, user_id):
+        bot.send_message(chat_id, "Couldn't post the quiz — try again in a bit.")
 
 
 @bot.message_handler(commands=["leaderboard", "scores", "top"], func=is_allowed)
@@ -323,7 +331,7 @@ def cmd_leaderboard(message):
     if not board:
         bot.send_message(
             message.chat.id,
-            "No scores yet — run /quiz to get the game going! 🧠",
+            "No scores yet — /subscribe to the Daily Quiz to get the board going! 🧠",
         )
         return
     medals = ["🥇", "🥈", "🥉"]
@@ -358,11 +366,14 @@ def cmd_unsubscribe(message):
 
 @bot.poll_answer_handler(func=lambda pa: True)
 def on_poll_answer(poll_answer):
-    # Silent scorer: the quiz poll itself already reveals correct/wrong, and a
-    # per-answer reply would spam group chats. We only update the leaderboard
-    # and streak. No func=is_allowed here — a PollAnswer has no from_user, so
-    # is_allowed would reject every answer whenever a whitelist is set.
+    # Two poll flows share this handler. First try the personalized /quiz session
+    # (advances the user's quiz + sends the next question / final score); if the
+    # answer isn't part of a session, fall back to the daily-broadcast scorer
+    # (leaderboard + streak). No func=is_allowed here — a PollAnswer has no
+    # from_user, so is_allowed would reject every answer when a whitelist is set.
     try:
+        if apply_session_answer(poll_answer):
+            return
         apply_poll_answer(poll_answer)
     except Exception as e:
         print(f"Error in on_poll_answer: {e}")
